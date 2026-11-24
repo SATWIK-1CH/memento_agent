@@ -68,6 +68,21 @@ def test_blogs_exclude_social_hosts() -> None:
     assert "reddit.com" in exclude
     assert "include_domains" not in client.calls[0]
     assert "blog" in client.calls[0]["query"].lower() or "review" in client.calls[0]["query"].lower()
+    assert "travel" not in client.calls[0]["query"].lower()
+
+
+def test_blog_query_is_topic_neutral() -> None:
+    client = DummyClient()
+    client.payload = {
+        "results": [
+            {"url": "https://example.com/python-313", "title": "Python 3.13", "content": "release"}
+        ]
+    }
+    provider = TavilySearchProvider("tvly-test", client=client)
+    provider.search("Python 3.13 release notes", source_type=SourceType.BLOG)
+    query = client.calls[0]["query"].lower()
+    assert "travel" not in query
+    assert "blog" in query or "article" in query
 
 
 def test_maps_invalid_key_and_credit_errors() -> None:

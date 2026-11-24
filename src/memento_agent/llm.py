@@ -63,7 +63,12 @@ class GeminiLLM:
                 temperature=0.2,
             )
 
-        return self._generate(contents=prompt, config_factory=config, models=[self._search_model])
+        return self._generate(
+            contents=prompt,
+            config_factory=config,
+            models=[self._search_model],
+            grounded=True,
+        )
 
     def probe(self) -> str:
         """Tiny generate to prove the model works. 404/503 fall back. list() is not trusted."""
@@ -183,6 +188,7 @@ class GeminiLLM:
         config_factory: Any,
         models: list[str] | None = None,
         attempts: int | None = None,
+        grounded: bool = False,
     ) -> Any:
         client = self._client_or_create()
         candidates = models or self._candidate_models()
@@ -199,8 +205,10 @@ class GeminiLLM:
                 )
 
             try:
-                response = call_with_retry(_call, max_attempts=tries)
-                self._model = model
+                response = call_with_retry(_call, max_attempts=tries, grounded=grounded)
+                # Do not let a successful grounded-search model overwrite plan/judge/write.
+                if models is None:
+                    self._model = model
                 return response
             except ModelUnavailableError as exc:
                 last_err = exc

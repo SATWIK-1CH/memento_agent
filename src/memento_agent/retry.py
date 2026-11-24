@@ -60,6 +60,7 @@ def call_with_retry(
     initial_delay_s: float = 1.5,
     max_delay_s: float = 32.0,
     sleeper: Callable[[float], None] = time.sleep,
+    grounded: bool = False,
 ) -> T:
     """Call ``fn``, backing off on transient 429/5xx. Billing/quota is not retried."""
     delay = initial_delay_s
@@ -71,7 +72,7 @@ def call_with_retry(
             raise
         except Exception as exc:
             last_exc = exc
-            mapped = classify_llm_error(exc)
+            mapped = classify_llm_error(exc, grounded=grounded)
             if isinstance(mapped, _FATAL):
                 raise mapped from exc
             if isinstance(mapped, RateLimitError) and attempt < max_attempts:
@@ -82,10 +83,10 @@ def call_with_retry(
                 continue
             raise mapped from exc
     assert last_exc is not None
-    raise classify_llm_error(last_exc)
+    raise classify_llm_error(last_exc, grounded=grounded)
 
 
-def classify_llm_error(exc: BaseException) -> Exception:
+def classify_llm_error(exc: BaseException, *, grounded: bool = False) -> Exception:
     """Map SDK/http errors onto Memento errors with actionable messages."""
     from memento_agent.errors import MementoError
 
@@ -94,6 +95,7 @@ def classify_llm_error(exc: BaseException) -> Exception:
     code = getattr(exc, "code", None)
     message = _error_text(exc)
     lower = message.lower()
+    exhausted = code == 429 or "resource_exhausted" in lower or "resource exhausted" in lower
 
     if _looks_like_model_unavailable(code, lower):
         return ModelUnavailableError(
@@ -103,14 +105,12 @@ def classify_llm_error(exc: BaseException) -> Exception:
             "to a model that works for your key."
         )
 
-    if any(marker in lower for marker in _GROUNDING_UNAVAILABLE) or (
-        "google_search" in lower and ("not available" in lower or "not supported" in lower)
+    if _looks_like_grounding_unavailable(lower) or (
+        grounded and exhausted and any(marker in lower for marker in _BILLING_MARKERS)
     ):
         return GroundingUnavailableError(_grounding_help())
 
-    if code == 429 or "resource_exhausted" in lower or "resource exhausted" in lower:
-        if any(marker in lower for marker in _BILLING_MARKERS):
-            return GroundingUnavailableError(_grounding_help())
+    if exhausted:
         if _looks_like_daily_quota(lower):
             return QuotaExhaustedError(
                 "Gemini free-tier quota is exhausted for today. Limits reset at midnight "
@@ -147,6 +147,12 @@ def _grounding_help() -> str:
         "(Researcher plan, 1,000 credits/month, no card). Gemini grounding remains an "
         "optional provider if you enable billing: --search-provider gemini"
     )
+
+
+def _looks_like_grounding_unavailable(lower: str) -> bool:
+    if any(marker in lower for marker in _GROUNDING_UNAVAILABLE):
+        return True
+    return "google_search" in lower and ("not available" in lower or "not supported" in lower)
 
 
 def _looks_like_model_unavailable(code: object, lower: str) -> bool:

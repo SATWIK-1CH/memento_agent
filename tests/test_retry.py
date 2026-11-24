@@ -30,7 +30,7 @@ def test_daily_quota_is_not_retried() -> None:
     assert calls["n"] == 1
 
 
-def test_billing_429_is_grounding_unavailable_and_not_retried() -> None:
+def test_grounded_billing_429_is_grounding_unavailable_and_not_retried() -> None:
     calls = {"n": 0}
 
     def boom():
@@ -41,7 +41,7 @@ def test_billing_429_is_grounding_unavailable_and_not_retried() -> None:
         )
 
     try:
-        call_with_retry(boom, max_attempts=4, sleeper=lambda _d: None)
+        call_with_retry(boom, max_attempts=4, sleeper=lambda _d: None, grounded=True)
         raise AssertionError("should have raised")
     except GroundingUnavailableError as exc:
         text = str(exc).lower()
@@ -49,6 +49,24 @@ def test_billing_429_is_grounding_unavailable_and_not_retried() -> None:
         assert "billing" in text or "free tier" in text
         assert "gemini-2.5-flash" not in text
     assert calls["n"] == 1
+
+
+def test_ungrounded_billing_429_retries_as_rate_limit() -> None:
+    calls = {"n": 0}
+
+    def boom():
+        calls["n"] += 1
+        raise FakeAPIError(
+            429,
+            "You exceeded your current quota, please check your plan and billing details.",
+        )
+
+    try:
+        call_with_retry(boom, max_attempts=3, initial_delay_s=0.01, max_delay_s=0.02, sleeper=lambda _d: None)
+        raise AssertionError("should have raised")
+    except RateLimitError:
+        pass
+    assert calls["n"] == 3
 
 
 def test_model_404_is_not_retried() -> None:

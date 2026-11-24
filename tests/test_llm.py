@@ -99,6 +99,26 @@ def test_watch_video_parses_notes(tmp_path) -> None:
     assert result.stays_shown == ["Simrose"]
 
 
+def test_search_does_not_replace_generation_model(tmp_path) -> None:
+    class DummyModels:
+        def generate_content(self, **kwargs):
+            assert kwargs["model"] == "search-model"
+            return SimpleNamespace(text="ok", candidates=[])
+
+    class DummyClient:
+        models = DummyModels()
+
+    settings = Settings(
+        api_key="k",
+        model="gen-model",
+        search_model="search-model",
+        db_path=tmp_path / "t.db",
+    )
+    llm = GeminiLLM(settings, client=DummyClient())
+    llm.generate_search("Agonda hotels")
+    assert llm.model == "gen-model"
+
+
 def test_all_models_unavailable(tmp_path) -> None:
     class DummyModels:
         def generate_content(self, **kwargs):

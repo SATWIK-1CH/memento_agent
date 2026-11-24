@@ -116,5 +116,5 @@ def steer_query(query: str, source_type: SourceType) -> str:
             q = f"{q} site:reddit.com"
     elif source_type is SourceType.BLOG:
         if "site:" not in q.lower():
-            q = f'{q} (blog OR review OR "travel guide") -site:youtube.com -site:reddit.com'
+            q = f"{q} (blog OR review OR article) -site:youtube.com -site:reddit.com"
     return q

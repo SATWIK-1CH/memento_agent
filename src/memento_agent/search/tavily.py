@@ -101,8 +101,10 @@ def _domain_filters(source_type: SourceType | None) -> tuple[list[str] | None, l
 
 def _tavily_query(query: str, source_type: SourceType | None) -> str:
     q = query.strip()
-    if source_type is SourceType.BLOG and "blog" not in q.lower():
-        q = f"{q} travel blog OR review"
+    if source_type is SourceType.BLOG:
+        lowered = q.lower()
+        if not any(word in lowered for word in ("blog", "review", "article", "news")):
+            q = f"{q} (blog OR review OR article)"
     return q
 
 

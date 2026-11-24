@@ -44,3 +44,4 @@ def test_steer_query_adds_site_operators() -> None:
     blog = steer_query("Agonda hotels", SourceType.BLOG)
     assert "-site:youtube.com" in blog
     assert "blog" in blog.lower()
+    assert "travel" not in blog.lower()
