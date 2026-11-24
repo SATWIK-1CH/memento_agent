@@ -20,6 +20,7 @@ from memento_agent.prompts import (
 )
 from memento_agent.retry import call_with_retry
 from memento_agent.types import (
+    ExtractedEntity,
     Judgment,
     ResearchAnswer,
     ResearchPlan,
@@ -30,11 +31,20 @@ from memento_agent.types import (
 
 
 class GeminiLLM:
-    def __init__(self, settings: Settings, *, client: Any | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        client: Any | None = None,
+        on_fallback: Any | None = None,
+    ) -> None:
         self._settings = settings
         self._client = client
+        self._injected_client = client is not None
+        self._watch_client = None
         self._model = settings.model
         self._search_model = settings.effective_search_model
+        self.on_fallback = on_fallback
 
     @property
     def model(self) -> str:
@@ -46,6 +56,26 @@ class GeminiLLM:
 
             self._client = genai.Client(api_key=self._settings.api_key)
         return self._client
+
+    def _watch_client_or_create(self) -> Any:
+        # Tests inject a dummy client. Live watches need a dedicated 600s v1beta client;
+        # a non-streaming default client disconnected around 270s in a 24 Nov 2026 run.
+        if self._injected_client:
+            return self._client
+        if self._watch_client is None:
+            from google import genai
+            from google.genai import types
+
+            timeout_ms = int(self._settings.watch_timeout_s * 1000)
+            try:
+                http = types.HttpOptions(timeout=timeout_ms, api_version="v1beta")
+            except TypeError:
+                try:
+                    http = types.HttpOptions(timeout=timeout_ms)
+                except TypeError:
+                    http = types.HttpOptions(api_version="v1beta")
+            self._watch_client = genai.Client(api_key=self._settings.api_key, http_options=http)
+        return self._watch_client
 
     def _candidate_models(self) -> list[str]:
         models = [self._model]
@@ -101,10 +131,53 @@ class GeminiLLM:
         *,
         iteration: int,
         max_iterations: int,
+        entities: list[ExtractedEntity] | None = None,
+        excerpt_limit: int | None = None,
+    ) -> Judgment:
+        limit = excerpt_limit or self._settings.judge_excerpt_chars
+        try:
+            return self._judge_once(
+                question,
+                sources,
+                source_types,
+                iteration=iteration,
+                max_iterations=max_iterations,
+                entities=entities,
+                excerpt_limit=limit,
+            )
+        except RateLimitError:
+            return self._judge_once(
+                question,
+                sources,
+                source_types,
+                iteration=iteration,
+                max_iterations=max_iterations,
+                entities=entities,
+                excerpt_limit=min(600, limit),
+            )
+
+    def _judge_once(
+        self,
+        question: str,
+        sources: list[SourceRecord],
+        source_types: list[SourceType],
+        *,
+        iteration: int,
+        max_iterations: int,
+        entities: list[ExtractedEntity] | None,
+        excerpt_limit: int,
     ) -> Judgment:
         raw = self._generate_json(
             JUDGE_SYSTEM,
-            judge_user_prompt(question, source_types, sources, iteration, max_iterations),
+            judge_user_prompt(
+                question,
+                source_types,
+                sources,
+                iteration,
+                max_iterations,
+                entities=entities,
+                excerpt_limit=excerpt_limit,
+            ),
             Judgment,
         )
         return Judgment.model_validate(raw)
@@ -115,11 +188,12 @@ class GeminiLLM:
         sources: list[SourceRecord],
         source_types: list[SourceType],
         judgment: Judgment,
+        entities: list[ExtractedEntity] | None = None,
     ) -> ResearchAnswer:
         citable = [s for s in sources if s.citable]
         raw = self._generate_json(
             WRITE_SYSTEM,
-            write_user_prompt(question, source_types, citable, judgment),
+            write_user_prompt(question, source_types, citable, judgment, entities=entities),
             ResearchAnswer,
         )
         return ResearchAnswer.model_validate(raw)
@@ -128,23 +202,27 @@ class GeminiLLM:
         from google.genai import types
 
         prompt = VIDEO_WATCH_PROMPT.format(title=title or url)
+        video_part = _video_part(types, url)
 
         def config():
-            return types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=VideoWatchNotes,
-                temperature=0.1,
-            )
+            kwargs: dict[str, Any] = {
+                "response_mime_type": "application/json",
+                "response_schema": VideoWatchNotes,
+                "temperature": 0.1,
+            }
+            media = getattr(types, "MediaResolution", None)
+            if media is not None:
+                kwargs["media_resolution"] = getattr(media, "MEDIA_RESOLUTION_LOW", media)
+            return types.GenerateContentConfig(**kwargs)
 
-        if hasattr(types.Part, "from_uri"):
-            video_part = types.Part.from_uri(file_uri=url, mime_type="video/mp4")
-        else:
-            video_part = types.Part(
-                file_data=types.FileData(file_uri=url, mime_type="video/mp4")
-            )
         contents = [video_part, prompt]
-        # Video watches are capped per run; 1–2 attempts then the caller falls back to captions.
-        response = self._generate(contents=contents, config_factory=config, attempts=2)
+        response = self._generate(
+            contents=contents,
+            config_factory=config,
+            attempts=3,
+            stream=True,
+            client=self._watch_client_or_create(),
+        )
         text = getattr(response, "text", None) or ""
         if not text.strip():
             raise LLMError("Gemini returned an empty video-watch response.")
@@ -189,15 +267,26 @@ class GeminiLLM:
         models: list[str] | None = None,
         attempts: int | None = None,
         grounded: bool = False,
+        stream: bool = False,
+        client: Any | None = None,
     ) -> Any:
-        client = self._client_or_create()
+        client = client or self._client_or_create()
         candidates = models or self._candidate_models()
         last_err: Exception | None = None
         for index, model in enumerate(candidates):
             remaining = len(candidates) - index - 1
             tries = attempts if attempts is not None else (2 if remaining else 4)
+            nxt = candidates[index + 1] if remaining else None
 
             def _call(model: str = model) -> Any:
+                if stream and hasattr(client.models, "generate_content_stream"):
+                    return _collect_stream(
+                        client.models.generate_content_stream(
+                            model=model,
+                            contents=contents,
+                            config=config_factory(),
+                        )
+                    )
                 return client.models.generate_content(
                     model=model,
                     contents=contents,
@@ -206,19 +295,79 @@ class GeminiLLM:
 
             try:
                 response = call_with_retry(_call, max_attempts=tries, grounded=grounded)
-                # Do not let a successful grounded-search model overwrite plan/judge/write.
                 if models is None:
                     self._model = model
                 return response
             except ModelUnavailableError as exc:
                 last_err = exc
+                if nxt:
+                    self._emit_fallback(model, nxt, exc)
                 continue
             except RateLimitError as exc:
-                if remaining and ("503" in str(exc) or "server error" in str(exc).lower()):
+                if remaining:
                     last_err = exc
+                    if nxt:
+                        self._emit_fallback(model, nxt, exc)
                     continue
                 raise
         raise last_err or LLMError("All configured Gemini models failed.")
+
+    def _emit_fallback(self, current: str, nxt: str, exc: BaseException) -> None:
+        if not self.on_fallback:
+            return
+        short = str(exc).strip().split("\n", 1)[0][:180]
+        self.on_fallback(f"{current} failed ({type(exc).__name__}: {short}); trying {nxt}")
+
+
+def _video_part(types: Any, url: str) -> Any:
+    """YouTube FileData part with STATIC frame extraction and LOW media resolution."""
+    processing = getattr(getattr(types, "MediaProcessing", None), "STATIC", "STATIC")
+    part = None
+    if hasattr(types.Part, "from_uri"):
+        for extra in (
+            {"media_resolution": "MEDIA_RESOLUTION_LOW"},
+            {},
+        ):
+            try:
+                part = types.Part.from_uri(file_uri=url, mime_type="video/mp4", **extra)
+                break
+            except TypeError:
+                continue
+    if part is None:
+        file_kwargs: dict[str, Any] = {"file_uri": url, "mime_type": "video/mp4"}
+        try:
+            data = types.FileData(**file_kwargs)
+        except TypeError:
+            data = types.FileData(file_uri=url)
+        try:
+            part = types.Part(file_data=data, media_processing=processing)
+        except TypeError:
+            part = types.Part(file_data=data)
+    if part is not None and getattr(part, "media_processing", None) is None:
+        try:
+            part = part.model_copy(update={"media_processing": processing})
+        except Exception:
+            try:
+                part.media_processing = processing
+            except Exception:
+                pass
+    return part
+
+
+def _collect_stream(chunks: Any) -> Any:
+    from types import SimpleNamespace
+
+    parts: list[str] = []
+    last = None
+    for chunk in chunks:
+        last = chunk
+        text = getattr(chunk, "text", None)
+        if text:
+            parts.append(text)
+    combined = "".join(parts)
+    if last is not None and not hasattr(last, "text"):
+        return last
+    return SimpleNamespace(text=combined, candidates=getattr(last, "candidates", None))
 
 
 def _strip_fences(text: str) -> str:

@@ -1,6 +1,7 @@
-from memento_agent.corroborate import merge_followups
+from memento_agent.corroborate import enforce_coverage, limitations_from_sources, merge_followups
 from memento_agent.types import (
     EntityCheck,
+    ExtractedEntity,
     FetchStatus,
     FollowupQuery,
     Judgment,
@@ -40,3 +41,51 @@ def test_uncorroborated_entity_adds_official_and_reddit_queries() -> None:
     assert any("palolem" in q for q in queries)
     assert any("official site" in q for q in queries)
     assert any("reddit.com" in q for q in queries)
+
+
+def test_enforce_coverage_blocks_early_enough() -> None:
+    judgment = Judgment(enough=True, gaps=[], missing_source_types=[SourceType.REDDIT], entity_checks=[])
+    entities = [
+        ExtractedEntity(
+            name="Cuba Agonda",
+            kind="hotel",
+            source_ids=["S1"],
+            source_types=[SourceType.YOUTUBE],
+        )
+    ]
+    sources = [
+        SourceRecord(
+            id="S1",
+            url="https://www.youtube.com/watch?v=x",
+            source_type=SourceType.YOUTUBE,
+            fetch_status=FetchStatus.YOUTUBE_META,
+            title="Cuba Agonda",
+            excerpt="Cuba Agonda pool",
+        )
+    ]
+    out = enforce_coverage(
+        judgment,
+        entities,
+        sources,
+        [SourceType.YOUTUBE, SourceType.BLOG, SourceType.REDDIT],
+        iteration=1,
+        max_iterations=3,
+    )
+    assert out.enough is False
+    assert any("cuba" in g.lower() for g in out.gaps)
+
+
+def test_limitations_collapse_reddit_403s() -> None:
+    sources = [
+        SourceRecord(
+            id=f"S{i}",
+            url=f"https://www.reddit.com/r/goatravel/comments/{i}/",
+            source_type=SourceType.REDDIT,
+            fetch_status=FetchStatus.BLOCKED,
+            fetch_note=f"HTTP 403 from old.reddit.com thread {i}",
+            excerpt="snippet",
+        )
+        for i in range(8)
+    ]
+    notes = limitations_from_sources(sources)
+    assert notes == ["8 Reddit threads blocked; used search snippets."]

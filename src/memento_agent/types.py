@@ -62,6 +62,22 @@ class FollowupQuery(BaseModel):
     gap: str = ""
 
 
+class ExtractedEntity(BaseModel):
+    """A stay or area named in fetched evidence, with the sources that mention it."""
+
+    name: str
+    kind: str = "hotel"
+    source_ids: list[str] = Field(default_factory=list)
+    source_types: list[SourceType] = Field(default_factory=list)
+    prices: list[str] = Field(default_factory=list)
+    ratings: list[str] = Field(default_factory=list)
+    quotes: list[str] = Field(default_factory=list)
+
+    @property
+    def corroborated(self) -> bool:
+        return len(set(self.source_types)) >= 2
+
+
 class EntityCheck(BaseModel):
     """Cross-source check for a named place, hotel, or similar entity."""
 

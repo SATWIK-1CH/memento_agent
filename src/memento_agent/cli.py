@@ -39,6 +39,7 @@ def _on_event(event: Event) -> None:
         "search": "blue",
         "fetch": "blue",
         "watch": "blue",
+        "fallback": "yellow",
         "judge": "magenta",
         "judged": "magenta",
         "write": "green",

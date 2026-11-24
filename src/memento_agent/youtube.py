@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -12,6 +13,39 @@ from memento_agent.types import FetchStatus, SourceRecord, SourceType, VideoWatc
 
 TranscriptFetcher = Callable[[str], str]
 
+_STOP = {
+    "the",
+    "and",
+    "for",
+    "with",
+    "from",
+    "this",
+    "that",
+    "your",
+    "are",
+    "was",
+    "were",
+    "best",
+    "which",
+    "other",
+    "search",
+    "cover",
+    "trip",
+    "areas",
+    "area",
+}
+_SHORT_KEEP = {"goa", "hi", "in"}
+_GENERIC_QUERY = {"hotels", "hotel", "best", "youtube", "search", "travel", "blogs", "reddit"}
+_GENERIC_TITLE = (
+    "top 10",
+    "top10",
+    "10 best",
+    "best hotels in",
+    "must visit",
+    "things to do",
+)
+_INDIAN_LANGS = ("en", "en-US", "en-GB", "hi", "hi-IN", "mr", "kn", "te", "ta", "ml", "bn", "gu", "pa", "or", "as")
+
 
 class YouTubeAnalyzer:
     """Cap Gemini video watches per run; fall back to captions, then title-only."""
@@ -21,13 +55,17 @@ class YouTubeAnalyzer:
         llm: Any,
         *,
         max_videos: int = 2,
-        excerpt_chars: int = 8_000,
+        excerpt_chars: int = 24_000,
         transcript_fetcher: TranscriptFetcher | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
+        watch_gap_s: float = 1.5,
     ) -> None:
         self._llm = llm
         self._max_videos = max(0, max_videos)
         self._excerpt_chars = excerpt_chars
         self._transcript_fetcher = transcript_fetcher or fetch_youtube_transcript
+        self._sleeper = sleeper
+        self._watch_gap_s = watch_gap_s
         self._processed = 0
 
     def enrich(
@@ -45,8 +83,14 @@ class YouTubeAnalyzer:
             for s in sources
             if s.source_type is SourceType.YOUTUBE and s.fetch_status is FetchStatus.YOUTUBE_META
         ]
-        ranked = sorted(candidates, key=lambda s: _relevance(s, question), reverse=True)
-        for source in ranked[:remaining]:
+        ranked = sorted(
+            candidates,
+            key=lambda s: _relevance(s, question),
+            reverse=True,
+        )
+        for index, source in enumerate(ranked[:remaining]):
+            if index and self._watch_gap_s:
+                self._sleeper(self._watch_gap_s)
             self._enrich_one(source, events=events)
             self._processed += 1
         return sources
@@ -60,7 +104,7 @@ class YouTubeAnalyzer:
             try:
                 notes = self._llm.watch_video(url, title=source.title)
                 source.fetch_status = FetchStatus.YOUTUBE_WATCHED
-                source.excerpt = _clip(_format_watch_notes(notes), self._excerpt_chars)
+                source.excerpt = _clip_keep_prices(_format_watch_notes(notes), self._excerpt_chars)
                 source.fetch_note = (
                     "Watched with Gemini video understanding; only what was seen/said is used."
                 )
@@ -83,7 +127,7 @@ class YouTubeAnalyzer:
         if not (transcript or "").strip():
             return
         source.fetch_status = FetchStatus.YOUTUBE_TRANSCRIPT
-        source.excerpt = _clip(
+        source.excerpt = _clip_keep_prices(
             "TRANSCRIPT (captions only; video was not watched)\n\n" + transcript.strip(),
             self._excerpt_chars,
         )
@@ -94,17 +138,52 @@ class YouTubeAnalyzer:
 
 
 def fetch_youtube_transcript(video_id: str) -> str:
-    """Captions via youtube-transcript-api (no key). Prefer English, then Hindi."""
+    """Captions via youtube-transcript-api (no key). English, then Indian languages."""
     from youtube_transcript_api import YouTubeTranscriptApi
 
-    languages = ["en", "en-US", "en-GB", "hi"]
-    snippets: Any
     api = YouTubeTranscriptApi()
-    if hasattr(api, "fetch"):
-        snippets = api.fetch(video_id, languages=languages)
-    else:
-        snippets = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)  # type: ignore[attr-defined]
+    snippets = _fetch_preferred_track(api, video_id)
     return _format_transcript(snippets)
+
+
+def _fetch_preferred_track(api: Any, video_id: str) -> Any:
+    listed = None
+    if hasattr(api, "list"):
+        try:
+            listed = api.list(video_id)
+        except Exception:
+            listed = None
+    if listed is not None:
+        snippets = _pick_from_list(listed)
+        if snippets is not None:
+            return snippets
+    if hasattr(api, "fetch"):
+        return api.fetch(video_id, languages=list(_INDIAN_LANGS))
+    getter = getattr(type(api), "get_transcript", None)
+    if getter is not None:
+        return getter(video_id, languages=list(_INDIAN_LANGS))
+    raise LLMError(f"No transcript method available for video {video_id}")
+
+
+def _pick_from_list(listed: Any) -> Any | None:
+    finders = []
+    if hasattr(listed, "find_manually_created_transcript"):
+        finders.append(listed.find_manually_created_transcript)
+    if hasattr(listed, "find_generated_transcript"):
+        finders.append(listed.find_generated_transcript)
+    if hasattr(listed, "find_transcript"):
+        finders.append(listed.find_transcript)
+    for finder in finders:
+        try:
+            track = finder(list(_INDIAN_LANGS))
+        except Exception:
+            continue
+        if track is None:
+            continue
+        if hasattr(track, "fetch"):
+            return track.fetch()
+        return track
+    return None
 
 
 def _format_transcript(snippets: Any) -> str:
@@ -152,10 +231,31 @@ def _format_watch_notes(notes: VideoWatchNotes) -> str:
 
 def _relevance(source: SourceRecord, question: str) -> int:
     hay = f"{source.title} {source.snippet} {source.excerpt}".lower()
-    tokens = {t for t in _tokenize(question) if len(t) > 3}
+    title = (source.title or "").lower()
+    tokens = [
+        t
+        for t in _tokenize(question)
+        if t not in _STOP and (len(t) >= 3 or t in _SHORT_KEEP)
+    ]
     if not tokens:
         return 0
-    return sum(1 for t in tokens if t in hay)
+    distinctive = [t for t in tokens if t not in _GENERIC_QUERY]
+    score = 0
+    for token in tokens:
+        if token in hay:
+            score += 3 if token in title else 1
+            if len(token) >= 5:
+                score += 1
+    for token in distinctive:
+        if token in title:
+            score += 6
+        elif token in hay:
+            score += 2
+    if any(g in title for g in _GENERIC_TITLE):
+        score -= 10
+        if not any(t in title for t in distinctive):
+            score -= 6
+    return score
 
 
 def _tokenize(text: str) -> list[str]:
@@ -171,14 +271,30 @@ def _fmt_ts(seconds: float) -> str:
     return f"{minutes}:{secs:02d}"
 
 
-def _clip(text: str, limit: int) -> str:
+def _clip_keep_prices(text: str, limit: int) -> str:
     text = text.strip()
     if len(text) <= limit:
         return text
-    return text[:limit].rstrip() + "…"
+    head = int(limit * 0.7)
+    kept = text[:head]
+    rest = text[head:]
+    price_lines = [
+        line
+        for line in rest.splitlines()
+        if any(mark in line.lower() for mark in ("₹", "rs.", "rs ", "inr", "rupee", "price", "/night", "per night"))
+    ]
+    extra = "\n".join(price_lines)
+    budget = limit - len(kept) - 20
+    if extra and budget > 40:
+        kept = kept.rstrip() + "\n…\n" + extra[:budget]
+    else:
+        kept = text[: limit - 1].rstrip() + "…"
+    return kept[:limit]
 
 
 def _short(exc: BaseException) -> str:
-    if isinstance(exc, (LLMError, RateLimitError, QuotaExhaustedError)):
-        return type(exc).__name__
-    return type(exc).__name__
+    msg = str(exc).strip().split("\n", 1)[0][:220]
+    name = type(exc).__name__
+    if isinstance(exc, (LLMError, RateLimitError, QuotaExhaustedError)) or msg:
+        return f"{name}: {msg}" if msg else name
+    return name

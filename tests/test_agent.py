@@ -172,7 +172,7 @@ def test_youtube_watch_feeds_corroboration(settings, store) -> None:
                 ],
             )
 
-        def judge(self, question, sources, source_types, *, iteration, max_iterations):
+        def judge(self, question, sources, source_types, *, iteration, max_iterations, **kwargs):
             self.judge_calls += 1
             watched = [s for s in sources if s.fetch_status is FetchStatus.YOUTUBE_WATCHED]
             assert watched, "judge must see watched YouTube evidence"
@@ -201,3 +201,30 @@ def test_empty_question_rejected(settings, store) -> None:
         raise AssertionError("should have raised")
     except ValueError:
         pass
+
+
+def test_judge_503_uses_heuristic_instead_of_failing(settings, store) -> None:
+    from memento_agent.errors import RateLimitError
+
+    class FlakyJudge(FakeLLM):
+        def judge(self, *args, **kwargs):
+            self.judge_calls += 1
+            raise RateLimitError("Gemini returned a transient server error (503).")
+
+    events: list[str] = []
+    agent = ResearchAgent(
+        settings,
+        llm=FlakyJudge(),
+        search=FakeSearch(),
+        fetcher=FakeFetcher(),
+        store=store,
+        on_event=lambda e: events.append(e.kind),
+        sleeper=lambda _d: None,
+    )
+    result = agent.run(
+        "Best hotels in Agonda. Search blogs and Reddit.",
+        source_types=[SourceType.BLOG, SourceType.REDDIT],
+    )
+    assert result.markdown
+    assert "fallback" in events
+    assert store.get_run(result.run_id)["status"] == "completed"

@@ -21,7 +21,10 @@ DEFAULT_MAX_ITERATIONS = 3
 DEFAULT_MAX_SEARCHES = 8
 DEFAULT_MAX_PAGES_PER_SEARCH = 4
 DEFAULT_MAX_VIDEOS = 2
-DEFAULT_EXCERPT_CHARS = 8_000
+DEFAULT_EXCERPT_CHARS = 24_000
+DEFAULT_JUDGE_EXCERPT_CHARS = 1_200
+DEFAULT_WATCH_TIMEOUT_S = 600.0
+DEFAULT_WATCH_GAP_S = 1.5
 
 
 def default_db_path() -> Path:
@@ -50,6 +53,9 @@ class Settings:
     max_pages_per_search: int = DEFAULT_MAX_PAGES_PER_SEARCH
     max_videos: int = DEFAULT_MAX_VIDEOS
     excerpt_chars: int = DEFAULT_EXCERPT_CHARS
+    judge_excerpt_chars: int = DEFAULT_JUDGE_EXCERPT_CHARS
+    watch_timeout_s: float = DEFAULT_WATCH_TIMEOUT_S
+    watch_gap_s: float = DEFAULT_WATCH_GAP_S
     request_timeout_s: float = 20.0
     search_delay_s: float = 0.4
     fetch_delay_s: float = 0.2

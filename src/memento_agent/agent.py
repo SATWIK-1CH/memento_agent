@@ -8,7 +8,20 @@ from collections.abc import Callable
 from typing import Any
 
 from memento_agent.config import Settings
-from memento_agent.corroborate import merge_followups
+from memento_agent.corroborate import (
+    enforce_coverage,
+    heuristic_judgment,
+    merge_followups,
+    reddit_unreachable,
+)
+from memento_agent.entities import (
+    extract_entities,
+    merge_missing_entities,
+    scrub_citations,
+    tidy_limitations,
+    tidy_open_questions,
+)
+from memento_agent.errors import LLMError, RateLimitError
 from memento_agent.events import Event, EventBus
 from memento_agent.fetch import Fetcher
 from memento_agent.llm import GeminiLLM
@@ -18,6 +31,7 @@ from memento_agent.search import build_search_provider
 from memento_agent.sources import detect_source_types
 from memento_agent.store import Store
 from memento_agent.types import (
+    FetchStatus,
     PlannedQuery,
     ResearchAnswer,
     ResearchResult,
@@ -49,6 +63,8 @@ class ResearchAgent:
         self.store = store
         self.events = EventBus(on_event)
         self._sleeper = sleeper
+        if hasattr(llm, "on_fallback"):
+            llm.on_fallback = lambda msg: self.events.emit("fallback", msg)
 
     def run(self, question: str, *, source_types: list[SourceType] | None = None) -> ResearchResult:
         question = question.strip()
@@ -121,19 +137,31 @@ class ResearchAgent:
                             status=record.fetch_status.value,
                         )
 
+                self._enrich_reddit(sources, question)
                 if self.youtube is not None:
                     self.youtube.enrich(sources, question, events=self.events)
-                    for record in sources:
-                        self.store.add_source(run_id, record)
+                for record in sources:
+                    self.store.add_source(run_id, record)
 
+                inventory = extract_entities(sources, question)
                 self.events.emit("judge", f"Judging evidence after iteration {iteration}…")
-                last_judgment = self.llm.judge(
+                last_judgment = self._judge(
                     question,
+                    sources,
+                    types,
+                    inventory,
+                    iteration=iteration,
+                )
+                last_judgment = enforce_coverage(
+                    last_judgment,
+                    inventory,
                     sources,
                     types,
                     iteration=iteration,
                     max_iterations=self.settings.max_iterations,
                 )
+                if searches_used >= self.settings.max_searches:
+                    last_judgment.enough = True
                 self.store.add_judgment(run_id, iteration, last_judgment)
                 self.events.emit(
                     "judged",
@@ -143,11 +171,17 @@ class ResearchAgent:
                 )
                 if last_judgment.enough or searches_used >= self.settings.max_searches:
                     break
-                pending = merge_followups(last_judgment, sources)
+                pending = merge_followups(
+                    last_judgment,
+                    sources,
+                    entities=inventory,
+                    blocked_reddit=reddit_unreachable(sources),
+                )
                 if pending:
                     all_queries.extend(pending)
                     self.store.add_sub_queries(run_id, iteration, pending)
 
+            inventory = extract_entities(sources, question)
             citable = [s for s in sources if s.citable]
             if not citable:
                 answer = ResearchAnswer(
@@ -160,15 +194,23 @@ class ResearchAgent:
             else:
                 self.events.emit("write", "Writing a cited answer…")
                 if last_judgment is None:
-                    last_judgment = self.llm.judge(
+                    last_judgment = self._judge(
                         question,
+                        sources,
+                        types,
+                        inventory,
+                        iteration=max(iterations, 1),
+                    )
+                    last_judgment = enforce_coverage(
+                        last_judgment,
+                        inventory,
                         sources,
                         types,
                         iteration=max(iterations, 1),
                         max_iterations=self.settings.max_iterations,
                     )
                     self.store.add_judgment(run_id, max(iterations, 1), last_judgment)
-                answer = self.llm.write(question, sources, types, last_judgment)
+                answer = self._write(question, sources, types, last_judgment, inventory)
 
             markdown = render_markdown(question, answer, sources, judgment=last_judgment)
             self.store.complete_run(
@@ -192,8 +234,73 @@ class ResearchAgent:
             )
         except Exception as exc:
             self.store.fail_run(run_id, str(exc), iterations=iterations, searches_used=searches_used)
-            # Do not emit "error" here: the CLI (and callers) print the raised exception once.
             raise
+
+    def _judge(self, question, sources, types, inventory, *, iteration: int):
+        try:
+            return self.llm.judge(
+                question,
+                sources,
+                types,
+                iteration=iteration,
+                max_iterations=self.settings.max_iterations,
+                entities=inventory,
+            )
+        except TypeError:
+            return self.llm.judge(
+                question,
+                sources,
+                types,
+                iteration=iteration,
+                max_iterations=self.settings.max_iterations,
+            )
+        except (RateLimitError, LLMError) as exc:
+            self.events.emit(
+                "fallback",
+                f"Judge failed ({type(exc).__name__}: {exc}); using coverage heuristic.",
+            )
+            return heuristic_judgment(
+                inventory,
+                sources,
+                types,
+                iteration=iteration,
+                max_iterations=self.settings.max_iterations,
+            )
+
+    def _write(self, question, sources, types, judgment, inventory):
+        try:
+            answer = self.llm.write(question, sources, types, judgment, entities=inventory)
+        except TypeError:
+            answer = self.llm.write(question, sources, types, judgment)
+        answer = merge_missing_entities(answer, inventory, sources)
+        answer = scrub_citations(answer, sources)
+        answer.limitations = tidy_limitations(answer.limitations)
+        answer.open_questions = tidy_open_questions(answer.open_questions)
+        return answer
+
+    def _enrich_reddit(self, sources: list[SourceRecord], question: str) -> None:
+        if not hasattr(self.search, "extract"):
+            return
+        blocked = [
+            s
+            for s in sources
+            if s.source_type is SourceType.REDDIT
+            and s.fetch_status in {FetchStatus.BLOCKED, FetchStatus.SNIPPET_ONLY, FetchStatus.FAILED}
+            and len(s.evidence_text) < 400
+        ]
+        if not blocked:
+            return
+        mapping = self.search.extract([s.display_url for s in blocked], query=question)
+        if not mapping:
+            return
+        for source in blocked:
+            text = mapping.get(source.display_url) or mapping.get(source.url) or ""
+            if len(text) <= len(source.evidence_text):
+                continue
+            source.excerpt = text[: self.settings.excerpt_chars]
+            source.fetch_status = FetchStatus.OK
+            source.fetch_note = "Opened via Tavily extract after Reddit HTTP block."
+            self.events.emit("fetch", f"{source.id} extracted via Tavily: {source.title or source.url}")
 
 
 def research(
@@ -226,6 +333,7 @@ def research(
             llm,
             max_videos=settings.max_videos,
             excerpt_chars=settings.excerpt_chars,
+            watch_gap_s=settings.watch_gap_s,
         )
     agent = ResearchAgent(
         settings,

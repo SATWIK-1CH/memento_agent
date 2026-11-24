@@ -378,15 +378,22 @@ class Fetcher:
                     final_url=str(response.url),
                 )
 
-        json_url = _reddit_json_url(hit.url)
-        try:
-            response = self._get(
-                json_url,
-                timeout=reddit_timeout,
-                headers={**DEFAULT_HEADERS, "Accept": "application/json,text/plain,*/*;q=0.8"},
-            )
+        for json_url in _reddit_json_urls(hit.url):
+            try:
+                response = self._get(
+                    json_url,
+                    timeout=reddit_timeout,
+                    headers={**DEFAULT_HEADERS, "Accept": "application/json,text/plain,*/*;q=0.8"},
+                )
+            except httpx.HTTPError as exc:
+                last_error = last_error or f"Reddit JSON failed: {exc}"
+                continue
             if response.status_code == 200:
-                payload = response.json()
+                try:
+                    payload = response.json()
+                except (json.JSONDecodeError, ValueError) as exc:
+                    last_error = last_error or f"Reddit JSON failed: {exc}"
+                    continue
                 title, excerpt = _reddit_excerpt(payload, fallback=hit.snippet)
                 if excerpt and excerpt != hit.snippet:
                     return self._record(
@@ -401,8 +408,18 @@ class Fetcher:
                     )
             else:
                 last_error = last_error or f"Reddit JSON HTTP {response.status_code}"
-        except (httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
-            last_error = last_error or f"Reddit JSON failed: {exc}"
+
+        if hit.snippet and len(hit.snippet) > 400:
+            # Tavily include_raw_content often has the thread when HTTP is 403.
+            return self._record(
+                hit,
+                source_id=source_id,
+                iteration=iteration,
+                source_type=SourceType.REDDIT,
+                status=FetchStatus.SNIPPET_ONLY,
+                excerpt=hit.snippet,
+                note="Reddit HTTP blocked; used Tavily raw content / search snippet.",
+            )
 
         note = (
             "Could not open the Reddit thread (timeout, login wall, or block). "
@@ -490,7 +507,18 @@ def _reddit_json_url(url: str) -> str:
         json_path = path
     else:
         json_path = f"{path}.json"
-    return f"https://old.reddit.com{json_path}?raw_json=1"
+    return f"https://www.reddit.com{json_path}?raw_json=1"
+
+
+def _reddit_json_urls(url: str) -> list[str]:
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    if not path.endswith(".json"):
+        path = f"{path}.json"
+    return [
+        f"https://www.reddit.com{path}?raw_json=1",
+        f"https://old.reddit.com{path}?raw_json=1",
+    ]
 
 
 def _looks_like_reddit_login(html: str) -> bool:

@@ -6,7 +6,7 @@ from memento_agent.agent import research
 from memento_agent.errors import GroundingUnavailableError, MementoError, QuotaExhaustedError
 from memento_agent.types import ResearchResult
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 __all__ = [
     "research",
     "ResearchResult",
