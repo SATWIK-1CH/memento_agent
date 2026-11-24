@@ -6,7 +6,7 @@ from typing import Any
 
 from memento_agent.errors import ConfigError, QuotaExhaustedError, RateLimitError
 from memento_agent.retry import call_with_retry
-from memento_agent.sources import classify_url
+from memento_agent.sources import classify_url, is_reddit_thread
 from memento_agent.types import SearchHit, SourceType
 
 # Researcher (free) plan: 1,000 credits/month; basic search = 1 credit; 100 RPM.
@@ -60,6 +60,8 @@ class TavilySearchProvider:
             url = str(item.get("url") or "")
             if not url.startswith("http"):
                 continue
+            if source_type is SourceType.REDDIT and not is_reddit_thread(url):
+                continue
             raw = str(item.get("raw_content") or "").strip()
             snippet = raw or str(item.get("content") or item.get("snippet") or "")
             if len(snippet) > 12_000:
@@ -77,7 +79,16 @@ class TavilySearchProvider:
 
     def extract(self, urls: list[str], *, query: str = "") -> dict[str, str]:
         """Tavily Extract (basic = 1 credit per 5 URLs) for pages the fetcher could not open."""
-        urls = [u for u in urls if u.startswith("http")][:20]
+        cleaned: list[str] = []
+        for url in urls:
+            if not url.startswith("http"):
+                continue
+            if "reddit.com" in url.lower() and not is_reddit_thread(url):
+                continue
+            cleaned.append(url)
+            if len(cleaned) >= 20:
+                break
+        urls = cleaned
         if not urls:
             return {}
         if not self._api_key and self._client is None:

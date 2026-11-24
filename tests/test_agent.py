@@ -194,6 +194,29 @@ def test_youtube_watch_feeds_corroboration(settings, store) -> None:
     assert "watched" in result.markdown.lower()
 
 
+def test_reddit_extract_is_logged(settings, store) -> None:
+    class ExtractSearch(FakeSearch):
+        def extract(self, urls, query=""):
+            return {urls[0]: "Longer extracted Reddit thread about Simrose on the sand. " * 8}
+
+    events: list[str] = []
+    agent = ResearchAgent(
+        settings,
+        llm=FakeLLM(),
+        search=ExtractSearch(),
+        fetcher=FakeFetcher(),
+        store=store,
+        on_event=lambda e: events.append(e.message),
+        sleeper=lambda _d: None,
+    )
+    agent.run(
+        "Best hotels in Agonda. Search blogs and Reddit.",
+        source_types=[SourceType.BLOG, SourceType.REDDIT],
+    )
+    joined = " ".join(events).lower()
+    assert "tavily extract" in joined
+
+
 def test_empty_question_rejected(settings, store) -> None:
     agent = ResearchAgent(settings, llm=FakeLLM(), search=FakeSearch(), fetcher=FakeFetcher(), store=store)
     try:

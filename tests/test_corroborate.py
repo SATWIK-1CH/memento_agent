@@ -51,6 +51,7 @@ def test_enforce_coverage_blocks_early_enough() -> None:
             kind="hotel",
             source_ids=["S1"],
             source_types=[SourceType.YOUTUBE],
+            confidence="high",
         )
     ]
     sources = [

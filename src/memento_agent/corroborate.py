@@ -61,7 +61,7 @@ def enforce_coverage(
             if entity.kind == "area":
                 continue
             types = set(entity.source_types)
-            if len(types) < 2:
+            if len(types) < 2 and entity.high_confidence:
                 uncorroborated.append(entity)
                 gap = f"{entity.name} only appears in {', '.join(t.value for t in types) or 'no'} source type(s)."
                 if gap not in gaps:
@@ -116,7 +116,7 @@ def merge_followups(
         if len({s.source_type for s in _sources_for(check, sources)}) >= 2:
             continue
         name = check.name.strip()
-        if not name:
+        if not name or not _followable_name(name):
             continue
         add(
             f'"{name}" review',
@@ -269,6 +269,8 @@ def _followups_for(
     out: list[FollowupQuery] = []
     topic = _topic_from_question(question)
     for entity in uncorroborated[:4]:
+        if not _followable_name(entity.name) or not entity.high_confidence:
+            continue
         out.append(
             FollowupQuery(
                 query=f'"{entity.name}" review',
@@ -295,6 +297,15 @@ def _followups_for(
             )
         )
     return out[:4]
+
+
+def _followable_name(name: str) -> bool:
+    text = name.strip()
+    if not text or "|" in text or "—" in text:
+        return False
+    if len(text) > 48 or len(text.split()) > 6:
+        return False
+    return True
 
 
 def _topic_from_question(question: str) -> str:

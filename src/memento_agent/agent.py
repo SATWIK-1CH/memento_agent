@@ -28,7 +28,7 @@ from memento_agent.llm import GeminiLLM
 from memento_agent.preflight import preflight
 from memento_agent.render import render_markdown
 from memento_agent.search import build_search_provider
-from memento_agent.sources import detect_source_types
+from memento_agent.sources import detect_source_types, is_reddit_thread
 from memento_agent.store import Store
 from memento_agent.types import (
     FetchStatus,
@@ -283,22 +283,35 @@ class ResearchAgent:
 
     def _enrich_reddit(self, sources: list[SourceRecord], question: str) -> None:
         if not hasattr(self.search, "extract"):
+            self.events.emit("fetch", "Tavily extract skipped (search provider has no extract).")
             return
         blocked = [
             s
             for s in sources
             if s.source_type is SourceType.REDDIT
             and s.fetch_status in {FetchStatus.BLOCKED, FetchStatus.SNIPPET_ONLY, FetchStatus.FAILED}
-            and len(s.evidence_text) < 400
+            and is_reddit_thread(s.display_url or s.url)
         ]
         if not blocked:
+            self.events.emit("fetch", "Tavily extract: no blocked Reddit threads to retry.")
             return
-        mapping = self.search.extract([s.display_url for s in blocked], query=question)
+        urls = [s.display_url or s.url for s in blocked]
+        self.events.emit("fetch", f"Tavily extract for {len(urls)} blocked Reddit thread(s)…")
+        try:
+            mapping = self.search.extract(urls, query=question) or {}
+        except Exception as exc:
+            self.events.emit("fetch", f"Tavily extract failed ({type(exc).__name__}: {exc}).")
+            return
         if not mapping:
+            self.events.emit("fetch", "Tavily extract returned no Reddit content.")
             return
         for source in blocked:
             text = mapping.get(source.display_url) or mapping.get(source.url) or ""
             if len(text) <= len(source.evidence_text):
+                self.events.emit(
+                    "fetch",
+                    f"{source.id} Tavily extract empty or not longer than snippet.",
+                )
                 continue
             source.excerpt = text[: self.settings.excerpt_chars]
             source.fetch_status = FetchStatus.OK

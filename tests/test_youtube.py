@@ -36,14 +36,18 @@ def _yt(source_id: str, *, title: str, snippet: str = "") -> SourceRecord:
 
 
 def test_watch_success_marks_watched() -> None:
+    from memento_agent.events import EventBus
+
     llm = FakeWatchLLM()
     analyzer = YouTubeAnalyzer(llm, max_videos=2, transcript_fetcher=lambda _vid: "")
     sources = [_yt("S1", title="Agonda beach hotels 2024", snippet="Simrose huts Agonda Goa")]
-    analyzer.enrich(sources, "Best hotels in Agonda Goa")
+    seen: list[str] = []
+    analyzer.enrich(sources, "Best hotels in Agonda Goa", events=EventBus(lambda e: seen.append(e.message)))
     assert sources[0].fetch_status is FetchStatus.YOUTUBE_WATCHED
     assert "Simrose" in sources[0].excerpt
     assert "WATCHED" in sources[0].excerpt
     assert llm.calls
+    assert any("watched" in m.lower() and "watching" not in m.lower() for m in seen)
 
 
 def test_watch_failure_falls_back_to_transcript() -> None:

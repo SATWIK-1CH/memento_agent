@@ -40,10 +40,16 @@ _AND_PAIR_RE = re.compile(
     r"((?:The\s+)?[A-Z0-9][A-Za-z0-9'&-]*(?:\s+(?:a|[A-Z0-9][A-Za-z0-9'&-]*)){0,3})\b"
 )
 _PRICE_RE = re.compile(
-    r"(?:₹|Rs\.?|INR)\s*[\d,]+(?:\s*/\s*(?:night|nt))?|"
+    r"(?:price\s+from\s+)?"
+    r"(?:₹|Rs\.?|INR)\s*[\d,]+(?:\s*[–—-]\s*[\d,]+)?"
+    r"(?:\s*/\s*(?:night|nt))?"
+    r"(?:\s+(?:for|a|per)\s+(?:(?![A-Z][a-z]+\s+[A-Z])[^\n.|]{0,32}))?"
+    r"|"
     r"[\d,]+\s*(?:rupees|INR)(?:\s*(?:a|/|per)\s*night)?",
     re.I,
 )
+STAY_LIMIT = 30
+_CONF_RANK = {"high": 2, "medium": 1, "low": 0}
 _RATING_RE = re.compile(r"\b([1-5](?:\.\d)?)\s*(?:/|out of)\s*5\b|\b([1-5](?:\.\d)?)★")
 _AREA_WORDS = ("palolem", "patnem", "cola", "benaulim", "varca", "majorda", "colva", "canacona")
 _STOP_NAMES = {
@@ -134,6 +140,46 @@ _PRICE_LEAD = {
     "cost",
     "costs",
 }
+_NORTH_GOA = {
+    "calangute",
+    "candolim",
+    "vagator",
+    "baga",
+    "anjuna",
+    "morjim",
+    "ashwem",
+    "arambol",
+    "mapusa",
+    "panaji",
+    "panjim",
+}
+_CARD_SKIP = {
+    "exceptional",
+    "superb",
+    "fabulous",
+    "wonderful",
+    "excellent",
+    "outstanding",
+    "reviews",
+    "review",
+    "price",
+    "guest",
+    "very",
+    "good",
+    "score",
+    "rated",
+    "location",
+    "unrated",
+    "cleanliness",
+}
+_BOILERPLATE_RE = re.compile(
+    r"trip type|tripadvisor|hidden gems|live music|merchandise|stretch of sand|"
+    r"helpful vote|see availability|guest photos|price from|show more|"
+    r"saturday night market|souvenirs|retail|night market|"
+    r"\b(?:january|february|march|april|may|june|july|august|september|"
+    r"october|november|december)\b",
+    re.I,
+)
 _STOP_FIRST = {
     "best",
     "top",
@@ -156,6 +202,14 @@ _STOP_FIRST = {
     "channel",
     "featured",
     "official",
+    "with",
+    "from",
+    "near",
+    "including",
+    "hidden",
+    "live",
+    "retail",
+    "trip",
 }
 
 
@@ -164,21 +218,36 @@ def extract_entities(sources: list[SourceRecord], question: str = "") -> list[Ex
     buckets: dict[str, ExtractedEntity] = {}
     question_is_stays = any(w in question.lower() for w in ("hotel", "stay", "stays", "resort", "where to stay"))
 
-    def add(name: str, kind: str, source: SourceRecord, quote: str = "", extra_prices: list[str] | None = None) -> None:
+    def add(
+        name: str,
+        kind: str,
+        source: SourceRecord,
+        quote: str = "",
+        extra_prices: list[str] | None = None,
+        confidence: str = "medium",
+    ) -> None:
         cleaned = _clean_name(name)
-        if not cleaned or _is_stop(cleaned):
+        if not cleaned or _is_stop(cleaned) or _boilerplate(cleaned):
+            return
+        if kind != "area" and (len(cleaned) > 48 or len(cleaned.split()) > 6):
+            return
+        if kind != "area" and _off_query_geo(cleaned, question):
             return
         key = _key(cleaned)
         blob = _blob(source)
         prices = list(extra_prices or [])
         prices.extend(_prices_near(blob, cleaned))
+        prices.extend(_watch_prices_for(blob, cleaned))
         ratings = _ratings_near(blob, cleaned)
         entity = buckets.get(key)
         if entity is None:
-            entity = ExtractedEntity(name=cleaned, kind=kind)
+            entity = ExtractedEntity(name=cleaned, kind=kind, confidence=confidence)
             buckets[key] = entity
-        elif len(cleaned) > len(entity.name) and kind == entity.kind:
-            entity.name = cleaned
+        else:
+            if len(cleaned) > len(entity.name) and kind == entity.kind:
+                entity.name = cleaned
+            if _CONF_RANK.get(confidence, 0) > _CONF_RANK.get(entity.confidence, 0):
+                entity.confidence = confidence
         if source.id not in entity.source_ids:
             entity.source_ids.append(source.id)
         if source.source_type not in entity.source_types:
@@ -199,41 +268,51 @@ def extract_entities(sources: list[SourceRecord], question: str = "") -> list[Ex
         blob = _blob(source)
         for match in _LIST_RE.finditer(blob):
             for part in re.split(r"[,;/]| and ", match.group(1)):
-                add(part.split(".")[0], "hotel", source, part)
+                add(part.split(".")[0], "hotel", source, part, confidence="high")
         for match in _AND_PAIR_RE.finditer(blob):
             left, right = match.group(1), match.group(2)
             if left.lower() in _AREA_WORDS or right.lower() in _AREA_WORDS:
                 continue
             sentence = _sentences_about(blob, left) or match.group(0)
+            left_conf = _stay_confidence(left, blob, question_is_stays=question_is_stays)
+            right_conf = _stay_confidence(right, blob, question_is_stays=question_is_stays)
             if (
-                _HOTEL_SUFFIX_HINT.search(left)
+                left_conf
+                or right_conf
+                or _HOTEL_SUFFIX_HINT.search(left)
                 or _HOTEL_SUFFIX_HINT.search(right)
-                or _looks_like_stay(left, blob, question_is_stays=question_is_stays)
-                or _looks_like_stay(right, blob, question_is_stays=question_is_stays)
                 or (question_is_stays and _STAY_VERB_RE.search(sentence))
             ):
-                add(left, "hotel", source, match.group(0))
-                add(right, "hotel", source, match.group(0))
+                conf = "high" if (left_conf == "high" or right_conf == "high" or _HOTEL_SUFFIX_HINT.search(left) or _HOTEL_SUFFIX_HINT.search(right)) else "medium"
+                add(left, "hotel", source, match.group(0), confidence=conf)
+                add(right, "hotel", source, match.group(0), confidence=conf)
         for match in _SUFFIX_RE.finditer(blob):
-            add(f"{match.group(1)} {match.group(2)}", "hotel", source, match.group(0))
+            add(
+                f"{match.group(1)} {match.group(2)}",
+                "hotel",
+                source,
+                match.group(0),
+                confidence="high",
+            )
         for match in _SPAN_RE.finditer(blob):
             name = match.group(1)
-            if _HOTEL_SUFFIX_HINT.search(name) or _looks_like_stay(
-                name, blob, question_is_stays=question_is_stays
-            ):
-                add(name, "hotel", source, name)
+            conf = _stay_confidence(name, blob, question_is_stays=question_is_stays)
+            if conf:
+                add(name, "hotel", source, name, confidence=conf)
         for match in _THE_NAME_RE.finditer(blob):
             name = match.group(1)
-            if _looks_like_stay(name, blob, question_is_stays=question_is_stays):
-                add(name, "hotel", source, name)
+            conf = _stay_confidence(name, blob, question_is_stays=question_is_stays)
+            if conf:
+                add(name, "hotel", source, name, confidence=conf)
         for match in _STAYED_RE.finditer(blob):
-            add(match.group(1), "hotel", source, match.group(0))
+            add(match.group(1), "hotel", source, match.group(0), confidence="high")
         for match in _CODE_RE.finditer(blob):
             token = match.group(1)
             if token in {"HTTP", "HTML", "JSON", "GOA", "INR", "USD", "OK"}:
                 continue
-            if _looks_like_stay(token, blob, question_is_stays=question_is_stays):
-                add(token, "hotel", source, token)
+            conf = _stay_confidence(token, blob, question_is_stays=question_is_stays)
+            if conf:
+                add(token, "hotel", source, token, confidence=conf)
         lower = blob.lower()
         for area in _AREA_WORDS:
             if re.search(rf"\b{re.escape(area)}\b", lower):
@@ -248,7 +327,7 @@ def extract_entities(sources: list[SourceRecord], question: str = "") -> list[Ex
     return _merge_aliases(list(buckets.values()))
 
 
-def inventory_block(entities: list[ExtractedEntity], *, stay_limit: int = 30) -> str:
+def inventory_block(entities: list[ExtractedEntity], *, stay_limit: int = STAY_LIMIT) -> str:
     stays = [e for e in entities if e.kind != "area"][:stay_limit]
     areas = [e for e in entities if e.kind == "area"]
     if not stays and not areas:
@@ -324,15 +403,27 @@ def merge_missing_entities(
     """Ensure every extracted stay/area appears in the structured answer."""
     mentioned = {_key(item.name) for section in answer.sections for item in section.items}
     by_id = {s.id: s for s in sources}
-    stays = [e for e in entities if e.kind != "area"]
+    stays = sorted(
+        [e for e in entities if e.kind != "area"],
+        key=lambda e: (-_CONF_RANK.get(e.confidence, 0), -len(e.source_ids), -len(e.name)),
+    )
     areas = [e for e in entities if e.kind == "area"]
-    stay_section = _section_for(answer, ("hotel", "stay", "agonda"), title="Stays named in sources")
+    stay_section = _section_for(answer, ("hotel", "stay"), title="Stays named in sources")
     area_section = _section_for(answer, ("area", "south goa", "where else"), title="Other areas")
+    merged = 0
+    leftover: list[str] = []
     for entity in stays:
         if _already_mentioned(entity.name, mentioned):
             continue
+        if merged >= STAY_LIMIT or entity.confidence == "low":
+            leftover.append(entity.name)
+            continue
         stay_section.items.append(_item_from_entity(entity, by_id))
         mentioned.add(_key(entity.name))
+        merged += 1
+    if leftover:
+        extra = "Also named in sources: " + ", ".join(leftover[:20]) + "."
+        stay_section.narrative = (stay_section.narrative + " " + extra).strip()
     for entity in areas:
         if _already_mentioned(entity.name, mentioned):
             continue
@@ -456,6 +547,8 @@ def _merge_aliases(entities: list[ExtractedEntity]) -> list[ExtractedEntity]:
                         existing.prices.append(price)
                 if len(entity.name) > len(existing.name):
                     existing.name = entity.name
+                if _CONF_RANK.get(entity.confidence, 0) > _CONF_RANK.get(existing.confidence, 0):
+                    existing.confidence = entity.confidence
                 absorbed = True
                 break
         if not absorbed:
@@ -505,25 +598,37 @@ def _key(name: str) -> str:
 
 
 def _looks_like_stay(name: str, blob: str, *, question_is_stays: bool = False) -> bool:
+    return bool(_stay_confidence(name, blob, question_is_stays=question_is_stays))
+
+
+def _stay_confidence(name: str, blob: str, *, question_is_stays: bool = False) -> str:
+    """'high' / 'medium' / '' — suffix or tight stay context, across title punctuation."""
     if _HOTEL_SUFFIX_HINT.search(name):
-        return True
-    sentence = _sentences_about(blob, name) or _quote_around(blob, name, radius=50)
-    if not sentence:
-        return False
-    tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9']+", sentence)]
+        return "high"
+    hay = _flatten_punct(blob)
+    tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9']+", hay)]
     needle = [t.lower() for t in re.findall(r"[A-Za-z0-9']+", name)]
     if not needle:
-        return False
+        return ""
     width = len(needle)
     for index in range(len(tokens) - width + 1):
         if tokens[index : index + width] != needle:
             continue
-        window = tokens[max(0, index - 4) : index + width + 4]
-        if any(word in _STAY_NOUNS for word in window):
-            return True
-        if question_is_stays and any(word in _STAY_VERBS for word in window):
-            return True
-    return False
+        after = tokens[index + width : index + width + 12]
+        before = tokens[max(0, index - 4) : index]
+        if any(word in _STAY_NOUNS for word in after[:8]):
+            return "high"
+        if any(word in _STAY_NOUNS for word in before):
+            return "high"
+        if question_is_stays and "price" in after[:10]:
+            return "high"
+        if question_is_stays and any(word in _STAY_VERBS for word in before + after[:4]):
+            return "medium"
+    return ""
+
+
+def _flatten_punct(text: str) -> str:
+    return re.sub(r"[|?/!:;,\-–—]+", " ", text)
 
 
 def _quote_around(blob: str, name: str, *, radius: int = 90) -> str:
@@ -536,29 +641,81 @@ def _quote_around(blob: str, name: str, *, radius: int = 90) -> str:
 
 
 def _prices_near(blob: str, name: str) -> list[str]:
+    """Prices after this name and before the next stay name/heading — never the previous card."""
     found: list[str] = []
     for match in re.finditer(re.escape(name), blob, flags=re.I):
-        prefix = blob[max(0, match.start() - 40) : match.start()]
-        if "." in prefix:
-            prefix = prefix.rsplit(".", 1)[-1]
         after = blob[match.end() :]
-        window = prefix + blob[match.start() : match.end() + _price_window_end(after)]
+        window = after[: _price_window_end(after, name)]
         found.extend(m.group(0).strip() for m in _PRICE_RE.finditer(window))
     return list(dict.fromkeys(found))[:4]
 
 
-def _price_window_end(after: str) -> int:
-    """Stop at the next sentence that introduces a different named stay."""
+def _price_window_end(after: str, current_name: str) -> int:
+    current = current_name.lower()
     end = len(after)
-    for match in re.finditer(r"\.\s+([A-Z0-9])", after):
+    for match in _SUFFIX_RE.finditer(after):
+        cand = f"{match.group(1)} {match.group(2)}".lower()
+        if cand == current or cand in current or current in cand:
+            continue
+        end = min(end, match.start())
+        break
+    for match in _SPAN_RE.finditer(after):
+        if match.start() >= end:
+            continue
+        if _skip_price_span(match.group(1), current):
+            continue
+        end = min(end, match.start())
+    for match in re.finditer(r"\.\s+[A-Z]", after):
+        if match.start() >= end:
+            continue
         rest = after[match.end() - 1 :]
         first = re.match(r"[A-Za-z0-9']+", rest)
         word = first.group(0).lower() if first else ""
-        if not word or word.isdigit() or word in _PRICE_LEAD:
+        if not word or word.isdigit() or word in _PRICE_LEAD or word in _CARD_SKIP:
             continue
         end = min(end, match.start() + 1)
         break
     return end
+
+
+def _skip_price_span(cand: str, current: str) -> bool:
+    lower = cand.lower()
+    if lower in current or current in lower:
+        return True
+    first = cand.split()[0].lower()
+    if first in _PRICE_LEAD or first in _CARD_SKIP or first.isdigit():
+        return True
+    return _is_stop(cand) or _boilerplate(cand)
+
+
+def _watch_prices_for(blob: str, name: str) -> list[str]:
+    prices_m = re.search(r"Prices stated:\s*(.+)", blob, re.I)
+    if not prices_m:
+        return []
+    stays_m = re.search(r"Stays shown:\s*(.+)", blob, re.I)
+    stays = [s.strip() for s in re.split(r"[;|]", stays_m.group(1)) if s.strip()] if stays_m else []
+    parts = [p.strip() for p in prices_m.group(1).split(";") if p.strip()]
+    needle = name.lower()
+    if any(needle == s.lower() or needle in s.lower() or s.lower() in needle for s in stays) and len(stays) <= 2:
+        return parts
+    return [p for p in parts if needle in p.lower()]
+
+
+def _boilerplate(name: str) -> bool:
+    if "|" in name or "—" in name:
+        return True
+    return bool(_BOILERPLATE_RE.search(name))
+
+
+def _off_query_geo(name: str, question: str) -> bool:
+    q = question.lower()
+    south = "agonda" in q or "south goa" in q or "palolem" in q or "patnem" in q
+    if not south:
+        return False
+    n = name.lower()
+    if any(part in n for part in ("agonda", "palolem", "patnem", "cola", "canacona", "cabo")):
+        return False
+    return any(place in n for place in _NORTH_GOA)
 
 
 def _ratings_near(blob: str, name: str) -> list[str]:

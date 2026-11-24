@@ -174,6 +174,154 @@ def test_does_not_treat_landmarks_as_hotels() -> None:
     assert any("ritz" in n for n in names), names
 
 
+def test_booking_card_layout_does_not_steal_previous_price() -> None:
+    from memento_agent.entities import _prices_near
+
+    blob = (
+        "Om Sai Agonda 8.5 Exceptional 123 reviews Price from ₹4,500 "
+        "Abba's Glory Land 8.2 Very good 40 reviews Price from ₹2,500 "
+        "Goa Cottages 8.0 reviews Price from ₹7,500 "
+        "Agonda Villas 9.1 Wonderful 80 reviews Price from ₹19,405"
+    )
+    om = _prices_near(blob, "Om Sai Agonda")
+    abba = _prices_near(blob, "Abba's Glory Land")
+    cottages = _prices_near(blob, "Goa Cottages")
+    villas = _prices_near(blob, "Agonda Villas")
+    assert any("4,500" in p for p in om)
+    assert not any("2,500" in p for p in om)
+    assert any("2,500" in p for p in abba)
+    assert not any("4,500" in p for p in abba)
+    assert not any("7,500" in p for p in abba)
+    assert any("7,500" in p for p in cottages)
+    assert not any("2,500" in p for p in cottages)
+    assert not any("19,405" in p for p in cottages)
+    assert any("19,405" in p for p in villas)
+    assert not any("7,500" in p for p in villas)
+
+    sources = [
+        SourceRecord(
+            id="S1",
+            url="https://www.booking.com/agonda",
+            title="Agonda hotels — Booking.com",
+            source_type=SourceType.WEB,
+            fetch_status=FetchStatus.OK,
+            excerpt=blob,
+        )
+    ]
+    by_name = {e.name.lower(): e for e in extract_entities(sources, "Best hotels in Agonda, Goa")}
+    assert any("4,500" in p for p in by_name["om sai agonda"].prices)
+    assert any("19,405" in p for p in by_name["agonda villas"].prices)
+    assert not any("7,500" in p for p in by_name["agonda villas"].prices)
+
+
+def test_rejects_tripadvisor_boilerplate_and_north_goa() -> None:
+    sources = [
+        SourceRecord(
+            id="S1",
+            url="https://www.tripadvisor.com/agonda",
+            title="Agonda hotels",
+            source_type=SourceType.BLOG,
+            fetch_status=FetchStatus.OK,
+            excerpt=(
+                "Hard Rock Calangute and Cavala - Candolim are noisy. "
+                "February 2012 – Trip type. Retail Merchandise Products. "
+                "with a long stretch of sand. Hidden Gems. live music. "
+                "Saturday Night Market—a mix of souvenirs. "
+                "Places to stay: Simrose, Agonda Villas."
+            ),
+        )
+    ]
+    names = {e.name.lower() for e in extract_entities(sources, "Best hotels in Agonda, Goa")}
+    joined = " | ".join(names)
+    assert "simrose" in names or any("simrose" in n for n in names)
+    assert "calangute" not in joined
+    assert "candolim" not in joined
+    assert "trip type" not in joined
+    assert "merchandise" not in joined
+    assert "hidden gems" not in joined
+    assert "stretch of sand" not in joined
+
+
+def test_extracts_cuba_cape_and_o2h_suffix() -> None:
+    sources = [
+        SourceRecord(
+            id="S26",
+            url="https://www.youtube.com/watch?v=cuba",
+            title="Is Cuba Agonda Worth It? | Agonda Beach Resort Review",
+            source_type=SourceType.YOUTUBE,
+            fetch_status=FetchStatus.YOUTUBE_META,
+            excerpt="Channel: TravelChan",
+        ),
+        SourceRecord(
+            id="S3",
+            url="https://thatgoangirl.example/agonda",
+            title="That Goan Girl",
+            source_type=SourceType.BLOG,
+            fetch_status=FetchStatus.OK,
+            excerpt="The Cape, Cabo de Rama is this romantic resort above the cliffs.",
+        ),
+        SourceRecord(
+            id="S13",
+            url="https://blog.example/o2h",
+            title="Agonda stays",
+            source_type=SourceType.BLOG,
+            fetch_status=FetchStatus.OK,
+            excerpt="We walked past The O2H Agonda Beach Resort at the north end.",
+        ),
+    ]
+    ents = extract_entities(sources, "Best hotels in Agonda, Goa")
+    names = {e.name.lower() for e in ents}
+    assert any("cuba" in n for n in names), names
+    assert any("cape" in n for n in names), names
+    assert any("o2h" in n for n in names), names
+
+
+def test_watch_notes_keep_price_qualifiers() -> None:
+    sources = [
+        SourceRecord(
+            id="S9",
+            url="https://www.youtube.com/watch?v=royal",
+            title="Royal Agonda tour",
+            source_type=SourceType.YOUTUBE,
+            fetch_status=FetchStatus.YOUTUBE_WATCHED,
+            excerpt=(
+                "WATCHED via Gemini video understanding (only what was seen or said):\n"
+                "Stays shown: Royal Agonda\n"
+                "Prices stated: INR 8500 for 2 nights; ₹30,000–40,000 package"
+            ),
+        )
+    ]
+    ents = extract_entities(sources, "Best hotels in Agonda")
+    royal = next(e for e in ents if "royal" in e.name.lower())
+    blob = " ".join(royal.prices)
+    assert "8500" in blob
+    assert "2 nights" in blob.lower() or "for 2" in blob.lower()
+    assert "30,000" in blob or "30000" in blob.replace(",", "")
+
+
+def test_merge_caps_items_and_adds_also_named() -> None:
+    sources = [
+        SourceRecord(
+            id="S1",
+            url="https://example.com/list",
+            title="stays",
+            source_type=SourceType.WEB,
+            fetch_status=FetchStatus.OK,
+            excerpt="Places to stay: " + ", ".join(f"Stay{i} Hotel" for i in range(40)),
+        )
+    ]
+    entities = extract_entities(sources, "Agonda hotels")
+    answer = ResearchAnswer(
+        summary="thin",
+        sections=[AnswerSection(title="Hotels in Agonda", items=[])],
+    )
+    merge_missing_entities(answer, entities, sources)
+    hotel_section = next(s for s in answer.sections if "hotel" in s.title.lower())
+    assert len(hotel_section.items) <= 30
+    if len(entities) > 30:
+        assert "also named" in hotel_section.narrative.lower()
+
+
 def test_tidy_open_questions_drops_generic() -> None:
     cleaned = tidy_open_questions(
         ["Needs more research", "What is Simrose charging this month?", "Always check latest prices online"]

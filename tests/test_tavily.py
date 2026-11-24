@@ -52,6 +52,28 @@ def test_reddit_uses_include_domains() -> None:
     assert "mid-range" in hits[0].snippet or "Simrose" in hits[0].snippet
 
 
+def test_reddit_search_drops_listing_urls() -> None:
+    client = DummyClient()
+    client.payload = {
+        "results": [
+            {
+                "url": "https://www.reddit.com/r/goatravel/top?after=t3_abc",
+                "title": "Top",
+                "content": "listing",
+            },
+            {
+                "url": "https://www.reddit.com/r/goatravel/comments/xyz/agonda/",
+                "title": "Agonda?",
+                "content": "We stayed at Simrose",
+            },
+        ]
+    }
+    provider = TavilySearchProvider("tvly-test", client=client)
+    hits = provider.search("Agonda hotels", source_type=SourceType.REDDIT)
+    assert len(hits) == 1
+    assert "/comments/" in hits[0].url
+
+
 def test_extract_returns_raw_content() -> None:
     class ExtractClient(DummyClient):
         def extract(self, **kwargs):

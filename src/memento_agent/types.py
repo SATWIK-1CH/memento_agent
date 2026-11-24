@@ -72,10 +72,15 @@ class ExtractedEntity(BaseModel):
     prices: list[str] = Field(default_factory=list)
     ratings: list[str] = Field(default_factory=list)
     quotes: list[str] = Field(default_factory=list)
+    confidence: str = "medium"
 
     @property
     def corroborated(self) -> bool:
         return len(set(self.source_types)) >= 2
+
+    @property
+    def high_confidence(self) -> bool:
+        return self.confidence == "high"
 
 
 class EntityCheck(BaseModel):

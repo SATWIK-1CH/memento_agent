@@ -108,6 +108,8 @@ class YouTubeAnalyzer:
                 source.fetch_note = (
                     "Watched with Gemini video understanding; only what was seen/said is used."
                 )
+                if events:
+                    events.emit("watch", f"{source.id} watched")
                 return
             except Exception as exc:
                 if events:
@@ -117,6 +119,8 @@ class YouTubeAnalyzer:
                     )
 
         if not video_id:
+            if events:
+                events.emit("watch", f"{source.id} failed; title only")
             return
         try:
             transcript = self._transcript_fetcher(video_id)
@@ -125,6 +129,8 @@ class YouTubeAnalyzer:
                 events.emit("watch", f"{source.id} captions unavailable ({_short(exc)}); title only")
             return
         if not (transcript or "").strip():
+            if events:
+                events.emit("watch", f"{source.id} failed; title only")
             return
         source.fetch_status = FetchStatus.YOUTUBE_TRANSCRIPT
         source.excerpt = _clip_keep_prices(
@@ -135,6 +141,8 @@ class YouTubeAnalyzer:
             "Gemini video watch failed or was skipped; used YouTube captions only. "
             "Auto-captions can be messy — treat details as unconfirmed unless another source agrees."
         )
+        if events:
+            events.emit("watch", f"{source.id} captions")
 
 
 def fetch_youtube_transcript(video_id: str) -> str:
