@@ -1,4 +1,4 @@
-"""Optional live smoke against Gemini. Skipped when GEMINI_API_KEY is unset."""
+"""Optional live smoke against Gemini + Tavily. Skipped when either key is unset."""
 
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ EXAMPLE = (
 def test_live_agonda_smoke(tmp_path: Path) -> None:
     if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
         pytest.skip("GEMINI_API_KEY not set; live smoke was not run")
+    if not os.environ.get("TAVILY_API_KEY"):
+        pytest.skip("TAVILY_API_KEY not set; live smoke was not run")
 
     from memento_agent.agent import research
     from memento_agent.config import Settings
@@ -26,16 +28,21 @@ def test_live_agonda_smoke(tmp_path: Path) -> None:
         max_iterations=2,
         max_searches=4,
         max_pages_per_search=2,
+        max_videos=1,
         load_dotenv_file=True,
     )
     settings = Settings(
         api_key=settings.api_key,
         model=settings.model,
+        fallback_models=settings.fallback_models,
+        search_provider=settings.search_provider,
+        tavily_api_key=settings.tavily_api_key,
         search_model=settings.search_model,
         db_path=settings.db_path,
         max_iterations=2,
         max_searches=4,
         max_pages_per_search=2,
+        max_videos=1,
         search_delay_s=0.5,
         fetch_delay_s=0.2,
     )

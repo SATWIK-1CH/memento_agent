@@ -26,6 +26,27 @@ def test_blocked_with_snippet_is_citable() -> None:
     assert rec.citable is True
 
 
+def test_youtube_watched_and_transcript_are_citable() -> None:
+    watched = SourceRecord(
+        id="S5",
+        url="https://www.youtube.com/watch?v=aaa",
+        title="Agonda Beach vlog",
+        source_type=SourceType.YOUTUBE,
+        fetch_status=FetchStatus.YOUTUBE_WATCHED,
+        excerpt="WATCHED: Simrose shown at 2:10",
+    )
+    transcript = SourceRecord(
+        id="S6",
+        url="https://www.youtube.com/watch?v=bbb",
+        title="Agonda captions",
+        source_type=SourceType.YOUTUBE,
+        fetch_status=FetchStatus.YOUTUBE_TRANSCRIPT,
+        excerpt="TRANSCRIPT: We stayed at Simrose",
+    )
+    assert watched.citable is True
+    assert transcript.citable is True
+
+
 def test_youtube_title_only_is_citable() -> None:
     rec = SourceRecord(
         id="S3",

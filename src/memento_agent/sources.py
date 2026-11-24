@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from memento_agent.types import SourceType
 
@@ -58,6 +58,30 @@ def detect_source_types(question: str) -> list[SourceType]:
     return found or list(_ALL_TYPES)
 
 
+def youtube_video_id(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.strip("/")
+    parts = [p for p in path.split("/") if p]
+    if "youtu.be" in host:
+        return parts[0] if parts else None
+    for marker in ("shorts", "embed", "live"):
+        if marker in parts:
+            idx = parts.index(marker)
+            if idx + 1 < len(parts):
+                return parts[idx + 1]
+    query = parse_qs(parsed.query)
+    vid = (query.get("v") or [None])[0]
+    return vid or None
+
+
+def canonical_youtube_url(url: str) -> str:
+    video_id = youtube_video_id(url)
+    if video_id:
+        return f"https://www.youtube.com/watch?v={video_id}"
+    return url
+
+
 def is_grounding_redirect(url: str) -> bool:
     host = urlparse(url).netloc.lower()
     if host.startswith("www."):
@@ -92,5 +116,5 @@ def steer_query(query: str, source_type: SourceType) -> str:
             q = f"{q} site:reddit.com"
     elif source_type is SourceType.BLOG:
         if "site:" not in q.lower():
-            q = f'{q} (blog OR review OR "travel guide") -site:youtube.com -site:reddit.com'
+            q = f"{q} (blog OR review OR article) -site:youtube.com -site:reddit.com"
     return q

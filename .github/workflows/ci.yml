@@ -24,6 +24,7 @@ jobs:
           python -m pip install -e ".[dev]"
       - name: Test
         env:
-          # Never required for the default suite; live tests skip without a key.
+          # Never required for the default suite; live tests skip without both keys.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
         run: python -m pytest -q

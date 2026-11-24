@@ -36,9 +36,9 @@ def test_render_groups_sources_and_marks_youtube() -> None:
             url="https://www.youtube.com/watch?v=aaa",
             title="Agonda Beach vlog",
             source_type=SourceType.YOUTUBE,
-            fetch_status=FetchStatus.YOUTUBE_META,
-            fetch_note="featured in this video",
-            excerpt="Channel: TravelChan",
+            fetch_status=FetchStatus.YOUTUBE_WATCHED,
+            fetch_note="watched",
+            excerpt="WATCHED: Simrose at 2:10",
         ),
         SourceRecord(
             id="S3",
@@ -51,6 +51,6 @@ def test_render_groups_sources_and_marks_youtube() -> None:
     ]
     md = render_markdown("Agonda hotels", answer, sources)
     assert "### YouTube" in md
-    assert "featured in this video" in md
+    assert "watched" in md.lower()
     assert "dead/parked" in md
     assert "[S1]" in md

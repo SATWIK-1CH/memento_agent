@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
-from memento_agent.search.gemini import GeminiSearchProvider, hits_from_response
+from memento_agent.config import Settings
+from memento_agent.search import GeminiSearchProvider, TavilySearchProvider, build_search_provider
+from memento_agent.search.gemini import hits_from_response
 from memento_agent.types import SourceType
 
 
@@ -44,3 +46,24 @@ def test_provider_calls_generate_search() -> None:
     provider = GeminiSearchProvider(Dummy())
     hits = provider.search("Agonda hotels", source_type=SourceType.REDDIT, max_results=5)
     assert hits[0].source_type is SourceType.REDDIT
+
+
+def test_factory_selects_tavily_by_default(tmp_path) -> None:
+    settings = Settings(
+        api_key="g",
+        tavily_api_key="t",
+        search_provider="tavily",
+        db_path=tmp_path / "x.db",
+    )
+    provider = build_search_provider(settings, llm=object())
+    assert isinstance(provider, TavilySearchProvider)
+
+
+def test_factory_selects_gemini_grounding(tmp_path) -> None:
+    settings = Settings(
+        api_key="g",
+        search_provider="gemini",
+        db_path=tmp_path / "x.db",
+    )
+    provider = build_search_provider(settings, llm=object())
+    assert isinstance(provider, GeminiSearchProvider)

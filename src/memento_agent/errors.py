@@ -10,7 +10,7 @@ class ConfigError(MementoError):
 
 
 class QuotaExhaustedError(MementoError):
-    """Gemini free-tier quota (daily RPD) is exhausted; retrying will not help."""
+    """A daily/monthly quota is exhausted; retrying will not help."""
 
 
 class RateLimitError(MementoError):
@@ -19,3 +19,11 @@ class RateLimitError(MementoError):
 
 class LLMError(MementoError):
     """The model call failed or returned unusable output."""
+
+
+class ModelUnavailableError(LLMError):
+    """This Gemini model is not available on the current API key."""
+
+
+class GroundingUnavailableError(MementoError):
+    """Gemini Google Search grounding is not available on this tier (typically free 3.x)."""

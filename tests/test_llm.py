@@ -1,8 +1,10 @@
+import json
 from types import SimpleNamespace
 
 from memento_agent.config import Settings
+from memento_agent.errors import ModelUnavailableError
 from memento_agent.llm import GeminiLLM, _strip_fences
-from memento_agent.types import ResearchPlan, SourceType
+from memento_agent.types import ResearchPlan, SourceType, VideoWatchNotes
 
 
 def test_strip_fences() -> None:
@@ -23,7 +25,7 @@ def test_plan_parses_structured_response(tmp_path) -> None:
     class DummyModels:
         def generate_content(self, **kwargs):
             assert kwargs["config"].response_mime_type == "application/json"
-            return SimpleNamespace(text=__import__("json").dumps(payload), candidates=[])
+            return SimpleNamespace(text=json.dumps(payload), candidates=[])
 
     class DummyClient:
         models = DummyModels()
@@ -34,3 +36,109 @@ def test_plan_parses_structured_response(tmp_path) -> None:
     assert isinstance(plan, ResearchPlan)
     assert len(plan.sub_queries) == 2
     assert plan.sub_queries[1].source_type is SourceType.REDDIT
+
+
+def test_falls_back_on_404(tmp_path) -> None:
+    calls: list[str] = []
+
+    class DummyModels:
+        def generate_content(self, **kwargs):
+            calls.append(kwargs["model"])
+            if kwargs["model"] == "gemini-3.5-flash-lite":
+                err = RuntimeError("gone")
+                err.code = 404  # type: ignore[attr-defined]
+                err.message = "This model models/gemini-3.5-flash-lite is no longer available to new users."  # type: ignore[attr-defined]
+                raise err
+            payload = {
+                "restated_question": "q",
+                "source_types": ["web"],
+                "sub_queries": [{"query": "Agonda", "source_type": "web", "rationale": "x"}],
+            }
+            return SimpleNamespace(text=json.dumps(payload), candidates=[])
+
+    class DummyClient:
+        models = DummyModels()
+
+    settings = Settings(
+        api_key="k",
+        model="gemini-3.5-flash-lite",
+        fallback_models=("gemini-3.8-flash",),
+        db_path=tmp_path / "t.db",
+    )
+    llm = GeminiLLM(settings, client=DummyClient())
+    plan = llm.plan("Agonda", [SourceType.WEB])
+    assert plan.sub_queries
+    assert calls == ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
+    assert llm.model == "gemini-3.8-flash"
+
+
+def test_watch_video_parses_notes(tmp_path) -> None:
+    notes = {
+        "summary": "Beach walk",
+        "stays_shown": ["Simrose"],
+        "prices_stated": [],
+        "pros": [],
+        "cons": [],
+        "timestamps": ["1:00 beach"],
+        "caveats": [],
+    }
+
+    class DummyModels:
+        def generate_content(self, **kwargs):
+            contents = kwargs["contents"]
+            assert contents
+            return SimpleNamespace(text=json.dumps(notes), candidates=[])
+
+    class DummyClient:
+        models = DummyModels()
+
+    settings = Settings(api_key="k", db_path=tmp_path / "t.db")
+    llm = GeminiLLM(settings, client=DummyClient())
+    result = llm.watch_video("https://www.youtube.com/watch?v=abc", title="Agonda")
+    assert isinstance(result, VideoWatchNotes)
+    assert result.stays_shown == ["Simrose"]
+
+
+def test_search_does_not_replace_generation_model(tmp_path) -> None:
+    class DummyModels:
+        def generate_content(self, **kwargs):
+            assert kwargs["model"] == "search-model"
+            return SimpleNamespace(text="ok", candidates=[])
+
+    class DummyClient:
+        models = DummyModels()
+
+    settings = Settings(
+        api_key="k",
+        model="gen-model",
+        search_model="search-model",
+        db_path=tmp_path / "t.db",
+    )
+    llm = GeminiLLM(settings, client=DummyClient())
+    llm.generate_search("Agonda hotels")
+    assert llm.model == "gen-model"
+
+
+def test_all_models_unavailable(tmp_path) -> None:
+    class DummyModels:
+        def generate_content(self, **kwargs):
+            err = RuntimeError("gone")
+            err.code = 404  # type: ignore[attr-defined]
+            err.message = "This model is no longer available to new users."  # type: ignore[attr-defined]
+            raise err
+
+    class DummyClient:
+        models = DummyModels()
+
+    settings = Settings(
+        api_key="k",
+        model="gemini-3.5-flash-lite",
+        fallback_models=("gemini-3.8-flash",),
+        db_path=tmp_path / "t.db",
+    )
+    llm = GeminiLLM(settings, client=DummyClient())
+    try:
+        llm.plan("Agonda", [SourceType.WEB])
+        raise AssertionError("should have raised")
+    except ModelUnavailableError:
+        pass

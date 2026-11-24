@@ -1,4 +1,4 @@
-"""Search provider interface. Gemini grounding is the default; Tavily/Brave can plug in later."""
+"""Search provider interface. Tavily is the default; Gemini grounding is optional (billing)."""
 
 from __future__ import annotations
 

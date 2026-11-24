@@ -117,6 +117,83 @@ def test_failed_empty_hits_skip_the_writer(settings, store) -> None:
     assert "No citable sources" in result.markdown
 
 
+def test_youtube_watch_feeds_corroboration(settings, store) -> None:
+    from memento_agent.types import VideoWatchNotes
+    from memento_agent.youtube import YouTubeAnalyzer
+
+    class YtSearch:
+        def search(self, query, *, source_type=None, max_results=8):
+            return [
+                SearchHit(
+                    url="https://www.youtube.com/watch?v=agonda1",
+                    title="Agonda beach hotels tour",
+                    snippet="Simrose and Palolem day trip",
+                    source_type=SourceType.YOUTUBE,
+                    query=query,
+                )
+            ]
+
+    class YtFetcher:
+        def fetch(self, hit, *, source_id, iteration):
+            return SourceRecord(
+                id=source_id,
+                url=hit.url,
+                title=hit.title,
+                source_type=SourceType.YOUTUBE,
+                snippet=hit.snippet,
+                fetch_status=FetchStatus.YOUTUBE_META,
+                fetch_note="title only",
+                excerpt=hit.snippet,
+                query=hit.query,
+                iteration=iteration,
+            )
+
+        def close(self) -> None:
+            return None
+
+    class WatchLLM(FakeLLM):
+        def watch_video(self, url, *, title=""):
+            return VideoWatchNotes(
+                summary="Tour of Agonda beach huts.",
+                stays_shown=["Simrose"],
+                prices_stated=["4000 rupees a night"],
+                timestamps=["1:20 Simrose"],
+            )
+
+        def plan(self, question, source_types):
+            from memento_agent.types import PlannedQuery, ResearchPlan
+
+            self.plan_calls += 1
+            return ResearchPlan(
+                restated_question=question,
+                source_types=source_types,
+                sub_queries=[
+                    PlannedQuery(query="Agonda youtube", source_type=SourceType.YOUTUBE, rationale="vlogs")
+                ],
+            )
+
+        def judge(self, question, sources, source_types, *, iteration, max_iterations):
+            self.judge_calls += 1
+            watched = [s for s in sources if s.fetch_status is FetchStatus.YOUTUBE_WATCHED]
+            assert watched, "judge must see watched YouTube evidence"
+            return Judgment(enough=True, rationale="Watched a relevant vlog.")
+
+    llm = WatchLLM()
+    analyzer = YouTubeAnalyzer(llm, max_videos=1, transcript_fetcher=lambda _vid: "")
+    agent = ResearchAgent(
+        settings,
+        llm=llm,
+        search=YtSearch(),
+        fetcher=YtFetcher(),
+        store=store,
+        youtube=analyzer,
+        sleeper=lambda _d: None,
+    )
+    result = agent.run("Agonda hotels. Search YouTube.", source_types=[SourceType.YOUTUBE])
+    assert any(s.fetch_status is FetchStatus.YOUTUBE_WATCHED for s in result.sources)
+    assert "watched" in result.markdown.lower()
+
+
 def test_empty_question_rejected(settings, store) -> None:
     agent = ResearchAgent(settings, llm=FakeLLM(), search=FakeSearch(), fetcher=FakeFetcher(), store=store)
     try:

@@ -55,7 +55,13 @@ def limitations_from_sources(sources: list[SourceRecord]) -> list[str]:
         if src.fetch_status is FetchStatus.OK:
             continue
         label = src.title or src.display_url
-        if src.fetch_status is FetchStatus.YOUTUBE_META:
+        if src.fetch_status is FetchStatus.YOUTUBE_WATCHED:
+            notes.append(f"YouTube: watched “{label}” with Gemini video understanding.")
+        elif src.fetch_status is FetchStatus.YOUTUBE_TRANSCRIPT:
+            notes.append(
+                f"YouTube: “{label}” is captions only (watch failed or was rate-limited)."
+            )
+        elif src.fetch_status is FetchStatus.YOUTUBE_META:
             notes.append(
                 f"YouTube: featured in video “{label}” — title/description only, video not watched."
             )

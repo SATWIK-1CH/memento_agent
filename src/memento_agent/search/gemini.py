@@ -40,7 +40,7 @@ class GeminiSearchProvider:
             f"Source type wanted: {source_type.value if source_type else 'any'}\n"
             f"Query: {steered}"
         )
-        response = call_with_retry(lambda: self._llm.generate_search(prompt))
+        response = call_with_retry(lambda: self._llm.generate_search(prompt), grounded=True)
         hits = hits_from_response(response, query=query, source_type=source_type)
         return hits[:max_results]
 
