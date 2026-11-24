@@ -149,6 +149,10 @@ activemq-data/
 # SageMath parsed files
 *.sage.py
 
+# Memento local state
+.memento/
+*.db
+
 # Environments
 .env
 .envrc
