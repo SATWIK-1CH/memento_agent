@@ -79,7 +79,11 @@ def render_markdown(
 def _source_line(src: SourceRecord) -> str:
     title = src.title or src.display_url
     extra = ""
-    if src.fetch_status is FetchStatus.YOUTUBE_META:
+    if src.fetch_status is FetchStatus.YOUTUBE_WATCHED:
+        extra = " — watched (Gemini video understanding)"
+    elif src.fetch_status is FetchStatus.YOUTUBE_TRANSCRIPT:
+        extra = " — captions only (video not watched)"
+    elif src.fetch_status is FetchStatus.YOUTUBE_META:
         extra = " — featured in this video (title/description only; not watched)"
     elif src.fetch_status is FetchStatus.DEAD:
         extra = " — dead/parked; not used as a live citation"

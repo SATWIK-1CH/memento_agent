@@ -47,6 +47,16 @@ def test_research_without_key_fails(monkeypatch) -> None:
     assert "GEMINI_API_KEY" in result.output
 
 
+def test_research_without_tavily_key_fails(monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("MEMENTO_SEARCH_PROVIDER", raising=False)
+    result = runner.invoke(app, ["research", "Agonda"])
+    assert result.exit_code == 1
+    assert "TAVILY_API_KEY" in result.output
+    assert "billing" in result.output.lower() or "grounding" in result.output.lower()
+
+
 def test_runs_without_key(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     result = runner.invoke(app, ["runs", "--db", str(tmp_path / "empty.db")])

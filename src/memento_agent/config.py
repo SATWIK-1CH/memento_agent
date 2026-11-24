@@ -10,14 +10,17 @@ from dotenv import load_dotenv
 
 from memento_agent.errors import ConfigError
 
-# Gemini 2.5 Flash is the flagship free-tier model that still includes Grounding
-# with Google Search (500 grounded requests/day, shared with Flash-Lite).
-# Gemini 3.x / 4.x have free tokens on many Flash models, but Search grounding
-# is paid-only on those generations. See README for the Dec 2026 deprecation note.
-DEFAULT_MODEL = "gemini-2.5-flash"
+# New free-tier Gemini keys cannot call gemini-2.5-* (404 "no longer available to
+# new users") even though models.list() still lists them. gemini-3.5-flash-lite
+# generate works; gemini-3.8-flash is a fallback on 503/404. Google Search
+# grounding is not available on free 3.x — search defaults to Tavily.
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_FALLBACK_MODELS = ("gemini-3.8-flash",)
+DEFAULT_SEARCH_PROVIDER = "tavily"
 DEFAULT_MAX_ITERATIONS = 3
 DEFAULT_MAX_SEARCHES = 8
 DEFAULT_MAX_PAGES_PER_SEARCH = 4
+DEFAULT_MAX_VIDEOS = 2
 DEFAULT_EXCERPT_CHARS = 8_000
 
 
@@ -37,19 +40,30 @@ def load_env_files() -> None:
 class Settings:
     api_key: str
     model: str = DEFAULT_MODEL
+    fallback_models: tuple[str, ...] = DEFAULT_FALLBACK_MODELS
+    search_provider: str = DEFAULT_SEARCH_PROVIDER
+    tavily_api_key: str = ""
     search_model: str | None = None
     db_path: Path = Path.home() / ".memento" / "memento.db"
     max_iterations: int = DEFAULT_MAX_ITERATIONS
     max_searches: int = DEFAULT_MAX_SEARCHES
     max_pages_per_search: int = DEFAULT_MAX_PAGES_PER_SEARCH
+    max_videos: int = DEFAULT_MAX_VIDEOS
     excerpt_chars: int = DEFAULT_EXCERPT_CHARS
     request_timeout_s: float = 20.0
     search_delay_s: float = 0.4
     fetch_delay_s: float = 0.2
+    skip_preflight_probe: bool = False
 
     @property
     def effective_search_model(self) -> str:
         return self.search_model or self.model
+
+    @property
+    def search_label(self) -> str:
+        if self.search_provider == "gemini":
+            return f"gemini-google-search:{self.effective_search_model}"
+        return "tavily"
 
     @classmethod
     def from_env(
@@ -58,10 +72,13 @@ class Settings:
         api_key: str | None = None,
         model: str | None = None,
         search_model: str | None = None,
+        search_provider: str | None = None,
+        tavily_api_key: str | None = None,
         db_path: Path | str | None = None,
         max_iterations: int | None = None,
         max_searches: int | None = None,
         max_pages_per_search: int | None = None,
+        max_videos: int | None = None,
         load_dotenv_file: bool = True,
         require_key: bool = True,
     ) -> Settings:
@@ -74,9 +91,37 @@ class Settings:
                 "Create a free key at https://aistudio.google.com/apikey"
             )
         path = Path(db_path) if db_path else default_db_path()
+        provider = (
+            search_provider
+            or os.environ.get("MEMENTO_SEARCH_PROVIDER")
+            or DEFAULT_SEARCH_PROVIDER
+        ).strip().lower()
+        if provider in {"google", "gemini-google-search", "grounding"}:
+            provider = "gemini"
+        if provider not in {"tavily", "gemini"}:
+            raise ConfigError(
+                f"Unknown search provider {provider!r}. Use 'tavily' (default, free) or 'gemini' "
+                "(Google Search grounding; requires Gemini billing)."
+            )
+        fallback_raw = os.environ.get("MEMENTO_FALLBACK_MODELS")
+        fallbacks = (
+            tuple(m.strip() for m in fallback_raw.split(",") if m.strip())
+            if fallback_raw
+            else DEFAULT_FALLBACK_MODELS
+        )
+        skip_probe = os.environ.get("MEMENTO_SKIP_PREFLIGHT", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
         return cls(
             api_key=key or "",
             model=model or os.environ.get("MEMENTO_MODEL") or DEFAULT_MODEL,
+            fallback_models=fallbacks,
+            search_provider=provider,
+            tavily_api_key=tavily_api_key
+            if tavily_api_key is not None
+            else (os.environ.get("TAVILY_API_KEY") or ""),
             search_model=search_model or os.environ.get("MEMENTO_SEARCH_MODEL") or None,
             db_path=path,
             max_iterations=_int_env("MEMENTO_MAX_ITERATIONS", max_iterations, DEFAULT_MAX_ITERATIONS),
@@ -84,6 +129,8 @@ class Settings:
             max_pages_per_search=_int_env(
                 "MEMENTO_MAX_PAGES", max_pages_per_search, DEFAULT_MAX_PAGES_PER_SEARCH
             ),
+            max_videos=_int_env("MEMENTO_MAX_VIDEOS", max_videos, DEFAULT_MAX_VIDEOS),
+            skip_preflight_probe=skip_probe,
         )
 
 

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import memento_agent._warnings  # noqa: F401  — before urllib3/httpx via agent imports
+
 import json
-import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -32,10 +33,12 @@ err_console = Console(stderr=True)
 def _on_event(event: Event) -> None:
     style = {
         "start": "bold cyan",
+        "preflight": "cyan",
         "plan": "cyan",
         "planned": "cyan",
         "search": "blue",
         "fetch": "blue",
+        "watch": "blue",
         "judge": "magenta",
         "judged": "magenta",
         "write": "green",
@@ -63,13 +66,25 @@ def _root(
 def research_cmd(
     question: list[str] = typer.Argument(..., help="Research question (quote it if it has spaces)."),
     model: Optional[str] = typer.Option(None, "--model", help="Gemini model for plan/judge/write."),
+    search_provider: Optional[str] = typer.Option(
+        None,
+        "--search-provider",
+        help="Search backend: tavily (default, free) or gemini (Google Search grounding; needs billing).",
+    ),
     search_model: Optional[str] = typer.Option(
         None,
         "--search-model",
-        help="Gemini model used with Google Search grounding (defaults to --model).",
+        help="Gemini model used with Google Search grounding when --search-provider gemini.",
     ),
     max_iterations: Optional[int] = typer.Option(None, "--max-iterations", min=1, max=8),
     max_searches: Optional[int] = typer.Option(None, "--max-searches", min=1, max=20),
+    max_videos: Optional[int] = typer.Option(
+        None,
+        "--max-videos",
+        min=0,
+        max=10,
+        help="Max YouTube videos to watch per run (default 2; Gemini free tier is 8h/day).",
+    ),
     db: Optional[Path] = typer.Option(None, "--db", help="SQLite file for persisted runs."),
     as_json: bool = typer.Option(False, "--json", help="Print the result as JSON instead of markdown."),
 ) -> None:
@@ -79,9 +94,11 @@ def research_cmd(
         settings = Settings.from_env(
             model=model,
             search_model=search_model,
+            search_provider=search_provider,
             db_path=db,
             max_iterations=max_iterations,
             max_searches=max_searches,
+            max_videos=max_videos,
         )
         result = research(text, settings=settings, on_event=None if as_json else _on_event)
     except (ConfigError, MementoError, ValueError) as exc:
@@ -139,8 +156,4 @@ def show_run(
 
 
 def main() -> None:
-    warnings.filterwarnings(
-        "ignore",
-        message="SOCKS support in urllib3 requires the installation of optional dependencies",
-    )
     app()

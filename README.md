@@ -1,16 +1,20 @@
 # memento_agent
 
-A personal assistant that starts as an **autonomous research agent**: you type a question, it searches the web on its own, reads pages, checks whether the evidence is corroborated, and returns a **cited answer**.
+A personal assistant that starts as an **autonomous research agent**: you type a question, it searches the web on its own, reads pages, watches a few YouTube videos, checks whether the evidence is corroborated, and returns a **cited answer**.
 
 This repository is built in stages. **Stage 1 (this package)** is a Python 3.11+ CLI that runs on Windows and Linux. Later stages add standing searches, memory, a Windows tray + Gemini Live voice UI, and an interactive graph.
+
+Memento stays **free by default**. Gemini (a working 3.x free-tier model, with a fallback) does planning, reading, judging, writing, and YouTube watching. Web search uses **Tavily's free Researcher plan**. Gemini Google Search grounding is optional for accounts with billing enabled.
 
 ## Stage 1: autonomous search loop
 
 ```text
 question
+   → preflight (keys, model probe, search-provider warning)
    → plan sub-queries (YouTube / Reddit / blogs+news / web)
-   → search (Gemini Grounding with Google Search)
+   → search (Tavily by default; optional Gemini grounding)
    → fetch pages (browser-like GET; honest fallbacks)
+   → watch the most relevant YouTube hits (Gemini video, then captions)
    → judge: enough corroborated evidence? gaps?
    → search again (budget cap) or write a cited brief
 ```
@@ -28,7 +32,8 @@ A good result:
 - Lists hotels in **tiers** (budget / mid-range / splurge) with why
 - Suggests **other South Goa areas** (Palolem, Patnem, …) with reasons
 - Cites every claim, **grouped by source type**
-- Is honest when Reddit threads could not be opened or a YouTube citation is title-only
+- Marks each YouTube source as **watched**, **captions only**, or **title only**
+- Is honest when Reddit threads could not be opened
 
 ## Windows setup
 
@@ -43,25 +48,41 @@ python --version
 ### 2. Free Gemini API key
 
 1. Open [Google AI Studio](https://aistudio.google.com/apikey) and create an API key (free tier is enough).
-2. In the project folder, copy `.env.example` to `.env` and paste the key:
+2. In the project folder, copy `.env.example` to `.env` and paste the key as `GEMINI_API_KEY`.
 
-```env
-GEMINI_API_KEY=your-key-here
-```
-
-Or set it for the current PowerShell session (do not commit the key):
+Brand-new free keys **cannot** call `gemini-2.5-*` (404: no longer available to new users) even though `models.list()` still shows them. memento defaults to `gemini-3.5-flash-lite` and falls back to `gemini-3.8-flash` on 404/503.
 
 ```powershell
-$env:GEMINI_API_KEY = "your-key-here"
+$env:GEMINI_API_KEY = "your-gemini-key-here"
 ```
 
 Command Prompt:
 
 ```cmd
-set GEMINI_API_KEY=your-key-here
+set GEMINI_API_KEY=your-gemini-key-here
 ```
 
-### 3. Install
+### 3. Free Tavily API key (web search)
+
+Google Search grounding on Gemini 3.x returns `429 RESOURCE_EXHAUSTED` mentioning **plan and billing** on the free tier. From 1 December 2026, `gemini-2.5-flash` requests also route to `gemini-3.5-flash-lite`, which does not include free grounding. So search is **Tavily**, not Gemini, unless you enable billing.
+
+1. Create a free Researcher key at [app.tavily.com](https://app.tavily.com) (no credit card).
+2. Put it in `.env` as `TAVILY_API_KEY`.
+
+Verified against Tavily's docs (November 2026):
+
+| Limit | Researcher (free) |
+| --- | --- |
+| Credits | **1,000 / month**, reset on the 1st |
+| Basic search | **1 credit** (`search_depth=basic`; this is what memento uses) |
+| Rate limit | **100 requests/minute** per account ([rate limits](https://docs.tavily.com/documentation/rate-limits)) |
+| Card | not required; requests stop when credits run out |
+
+```powershell
+$env:TAVILY_API_KEY = "your-tavily-key-here"
+```
+
+### 4. Install
 
 ```powershell
 git clone https://github.com/SATWIK-1CH/memento_agent.git
@@ -73,7 +94,7 @@ python -m pip install -e .
 
 If PowerShell blocks the venv script, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or call `.\.venv\Scripts\python.exe -m memento_agent ...` instead.
 
-### 4. Run
+### 5. Run the Agonda query
 
 ```powershell
 memento research "Best hotels in Agonda, Goa, and which other South Goa areas are best to cover on a trip. Search YouTube, travel blogs and Reddit."
@@ -84,10 +105,12 @@ Useful flags:
 | Flag | Meaning |
 | --- | --- |
 | `--json` | Machine-readable result (for a future tray app) |
-| `--model` | Gemini model for plan / judge / write |
+| `--model` | Gemini model for plan / judge / write / video watch |
+| `--search-provider` | `tavily` (default) or `gemini` (grounding; needs billing) |
 | `--search-model` | Model used **with** Google Search grounding |
 | `--max-iterations` | Default `3` |
-| `--max-searches` | Default `8` grounded searches per question |
+| `--max-searches` | Default `8` searches per question |
+| `--max-videos` | Default `2` YouTube watches per run (Gemini free: 8h of YouTube/day) |
 | `--db` | SQLite path (default `%USERPROFILE%\.memento\memento.db`) |
 
 ```powershell
@@ -97,56 +120,66 @@ memento show <run-id>
 
 Linux / macOS is the same with `source .venv/bin/activate` and `~/.memento/memento.db`.
 
-## Default model (free tier)
+A startup **preflight** runs before the plan step. Missing `GEMINI_API_KEY` / `TAVILY_API_KEY`, a 404 model, or Gemini grounding on the free tier is explained in one message instead of a raw Google JSON blob.
 
-Checked against [Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing) and [rate limits](https://ai.google.dev/gemini-api/docs/rate-limits) (November 2026):
+## Default model and search (free tier)
 
-| Model | Free tokens | Free Grounding with Google Search |
+Checked against [Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing), a live smoke on 24 Nov 2026 with a **new** free Gemini key, and [Tavily credits](https://docs.tavily.com/documentation/api-credits):
+
+| Piece | Default | Notes |
 | --- | --- | --- |
-| **`gemini-2.5-flash`** (default) | yes | **yes**, ~**500** grounded requests/day, shared with Flash-Lite |
-| `gemini-2.5-flash-lite` | yes | same 500 RPD pool |
-| Gemini 3.x / 4.x Flash (e.g. `gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-4-hydrogen`) | often yes | **not on the free tier** (paid: 5,000 searches/month then $14/1k, 1,500 RPD cap) |
-
-The default is `gemini-2.5-flash` because it is the strongest **free-tier** model that can actually search. Gemini 2.5 Flash is deprecated in AI Studio and, **from 1 December 2026**, API calls may route to `gemini-3.5-flash-lite` (tokens still free, **search grounding is not**). If search starts failing around then, set:
-
-```env
-MEMENTO_SEARCH_MODEL=gemini-2.5-flash-lite
-```
-
-`gemini-2.5-flash-lite` is documented as still served for existing API users. Brand-new keys sometimes cannot call 2.5 models at all; if that happens, either enable billing for a Gemini 3 model with search, or plug in another `SearchProvider` later (Tavily/Brave).
-
-To keep **free search** on 2.5 and use a newer model only for writing:
+| Plan / judge / write | **`gemini-3.5-flash-lite`** | Works on new free keys. `gemini-2.5-flash` 404s for new users. |
+| Fallback | `gemini-3.8-flash` | Used on 404 or 503 (high demand). Set `MEMENTO_FALLBACK_MODELS`. |
+| Web search | **Tavily** `basic` | 1 credit / search, 1,000 credits/month. Source-type steering uses `include_domains` (YouTube, Reddit) or `exclude_domains` (blogs vs social). |
+| Gemini grounding | opt-in `--search-provider gemini` | Not free on 3.x. Billing 429 is **not** retried. |
+| YouTube watch | Gemini video understanding | Public URLs via `Part.from_uri` (`video/mp4`). Free cap: **8 hours/day**. Fallback: `youtube-transcript-api` captions. |
 
 ```env
-MEMENTO_MODEL=gemini-3.8-flash
-MEMENTO_SEARCH_MODEL=gemini-2.5-flash
+MEMENTO_MODEL=gemini-3.5-flash-lite
+MEMENTO_FALLBACK_MODELS=gemini-3.8-flash
+MEMENTO_SEARCH_PROVIDER=tavily
+MEMENTO_MAX_VIDEOS=2
 ```
 
-Rate limits: 429s retry with backoff. A **daily** quota error is not retried; the CLI says so and mentions the midnight Pacific reset.
+Rate limits: burst 429s retry with backoff. A **daily** Gemini quota error, a Tavily credit exhaustion, or a Gemini **plan and billing** 429 is not retried; the CLI says so.
 
 ## Architecture
 
 ```text
 CLI (typer)  ──►  research()  ──►  SQLite ~/.memento/memento.db
                      │
-                     ├─ GeminiLLM          plan / judge / write (JSON schemas)
-                     ├─ SearchProvider     default: Gemini google_search tool
-                     │                     (site: steering for YouTube, Reddit, blogs)
-                     └─ Fetcher            httpx GET + trafilatura
+                     ├─ preflight          keys + tiny Gemini generate (not models.list)
+                     ├─ GeminiLLM          plan / judge / write / video watch
+                     ├─ SearchProvider     default: Tavily
+                     │                     optional: Gemini google_search (billing)
+                     ├─ Fetcher            httpx GET + trafilatura
+                     └─ YouTubeAnalyzer    watch → captions → title-only
 ```
 
-- **Search is an interface** (`memento_agent.search.SearchProvider`). Stage 1 ships `GeminiSearchProvider`. A Tavily/Brave adapter can implement the same `search(query, source_type=...)` method.
+- **Search is an interface** (`memento_agent.search.SearchProvider`). Default is `TavilySearchProvider`. `GeminiSearchProvider` remains for billed Google Search grounding.
 - **Persistence** (`runs`, `sub_queries`, `sources`, `judgments`) is the hook for stage 2 (diff new hits) and stage 3 (preferences + already-seen URLs).
 - **Corroboration:** the critic must tick `entity_checks` for named hotels/places. A name that appears in only one listicle is treated as a gap; the next iteration searches for an official/current listing and Reddit mentions. Parked/dead domains are marked `dead` and are not cited.
-- **Source types** in the question (`Search YouTube, travel blogs and Reddit`) steer both queries and the Sources section of the answer.
+- **Source types** in the question (`Search YouTube, travel blogs and Reddit`) steer both queries (`include_domains` / `exclude_domains` on Tavily, `site:` on Gemini grounding) and the Sources section of the answer.
+
+## YouTube
+
+Gemini can take a **public** YouTube URL as video input ([video understanding](https://ai.google.dev/gemini-api/docs/video-understanding)): 8 hours/day on the free tier, up to 10 videos per request on 2.5+, public videos only. memento watches at most `MEMENTO_MAX_VIDEOS` (default 2) of the most relevant hits, extracts stays shown / prices stated / pros/cons / timestamps, then feeds that into corroboration.
+
+If the watch fails or is rate-limited, captions are fetched with `youtube-transcript-api` (no extra key). Each source is labelled:
+
+| Status | Meaning |
+| --- | --- |
+| `youtube_watched` | Gemini actually processed the video |
+| `youtube_transcript` | Captions only |
+| `youtube_meta` | Title / description / search snippet only |
 
 ## Known limitations (from real Agonda-style fetches)
 
 - **Reddit** is the weakest full-page source. Search snippets (e.g. r/goatravel) are useful; thread HTML, `old.reddit.com`, and `.json` often time out or hit a login wall. HEAD requests 403; we only GET, with a browser User-Agent. Unopened threads are cited as **search snippet only**.
-- **YouTube** is not watched and transcripts are not used (auto-captions, especially Hindi, are messy). Citations are **“featured in video &lt;title&gt;”** from oEmbed / title / description.
+- **YouTube** watches are capped. Captions can be messy (especially auto-Hindi). Title-only hits stay “featured in video &lt;title&gt;”.
 - **Official hotel sites** sometimes 406 or time out unless the GET looks like a browser; we retry 406 with a broader `Accept`. Advertised domains can be **parked/dead** — those URLs are validated and dropped from live citations.
 - **Listicles lie.** Names get copied wrong (a restaurant listed as a hotel, a 2019 rename). The loop asks for **two source types** before treating a name as confirmed.
-- Gemini Grounding sometimes returns redirect URLs (`vertexaisearch.cloud.google.com/...`); the fetcher follows redirects and stores the final URL.
+- Gemini Grounding (opt-in) sometimes returns redirect URLs (`vertexaisearch.cloud.google.com/...`); the fetcher follows redirects and stores the final URL.
 - Google’s grounding ToS can require showing Search Suggestions HTML in production UIs. This CLI prints the queries it used instead.
 
 ## Tests
@@ -156,7 +189,7 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-Unit tests mock Gemini and HTTP. A live smoke test (`tests/test_live_smoke.py`) runs the Agonda query only when `GEMINI_API_KEY` is set; CI skips it unless that secret exists.
+Unit tests mock Gemini, Tavily, and YouTube. A live smoke test (`tests/test_live_smoke.py`) runs the Agonda query only when **both** `GEMINI_API_KEY` and `TAVILY_API_KEY` are set; CI skips it unless those secrets exist.
 
 ## What stage 2 should build on
 

@@ -27,6 +27,8 @@ class SourceType(str, Enum):
 
 class FetchStatus(str, Enum):
     OK = "ok"
+    YOUTUBE_WATCHED = "youtube_watched"
+    YOUTUBE_TRANSCRIPT = "youtube_transcript"
     YOUTUBE_META = "youtube_meta"
     BLOCKED = "blocked"
     FAILED = "failed"
@@ -95,6 +97,18 @@ class AnswerSection(BaseModel):
     items: list[RankedItem] = Field(default_factory=list)
 
 
+class VideoWatchNotes(BaseModel):
+    """Structured notes from Gemini watching a YouTube URL."""
+
+    summary: str = ""
+    stays_shown: list[str] = Field(default_factory=list)
+    prices_stated: list[str] = Field(default_factory=list)
+    pros: list[str] = Field(default_factory=list)
+    cons: list[str] = Field(default_factory=list)
+    timestamps: list[str] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+
+
 class ResearchAnswer(BaseModel):
     summary: str
     sections: list[AnswerSection] = Field(default_factory=list)
@@ -134,6 +148,8 @@ class SourceRecord(BaseModel):
         if self.fetch_status is FetchStatus.DEAD:
             return False
         if self.fetch_status is FetchStatus.YOUTUBE_META:
+            return bool((self.title or self.evidence_text).strip())
+        if self.fetch_status in {FetchStatus.YOUTUBE_WATCHED, FetchStatus.YOUTUBE_TRANSCRIPT}:
             return bool((self.title or self.evidence_text).strip())
         return bool(self.evidence_text)
 

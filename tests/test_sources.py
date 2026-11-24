@@ -1,4 +1,10 @@
-from memento_agent.sources import classify_url, detect_source_types, steer_query
+from memento_agent.sources import (
+    canonical_youtube_url,
+    classify_url,
+    detect_source_types,
+    steer_query,
+    youtube_video_id,
+)
 from memento_agent.types import SourceType
 
 EXAMPLE = (
@@ -23,6 +29,13 @@ def test_classify_youtube_and_reddit_hosts() -> None:
     assert classify_url("https://youtu.be/abc") is SourceType.YOUTUBE
     assert classify_url("https://old.reddit.com/r/goatravel/comments/x/") is SourceType.REDDIT
     assert classify_url("https://www.tripadvisor.com/Hotel_Review") is SourceType.BLOG
+
+
+def test_youtube_video_id_and_canonical() -> None:
+    assert youtube_video_id("https://youtu.be/abc123XYZ") == "abc123XYZ"
+    assert youtube_video_id("https://www.youtube.com/watch?v=abc123XYZ&t=12") == "abc123XYZ"
+    assert youtube_video_id("https://www.youtube.com/shorts/abc123XYZ") == "abc123XYZ"
+    assert canonical_youtube_url("https://youtu.be/abc123XYZ") == "https://www.youtube.com/watch?v=abc123XYZ"
 
 
 def test_steer_query_adds_site_operators() -> None:

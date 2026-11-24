@@ -14,12 +14,14 @@ import json
 import re
 import time
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
+
+import memento_agent._warnings  # noqa: F401  — filter urllib3 SOCKS warning before httpx
 
 import httpx
 import trafilatura
 
-from memento_agent.sources import classify_url, is_grounding_redirect
+from memento_agent.sources import canonical_youtube_url, classify_url, is_grounding_redirect
 from memento_agent.types import FetchStatus, SearchHit, SourceRecord, SourceType
 
 # Browser-like GET. A custom bot UA plus HEAD requests is what 403/406s many
@@ -274,7 +276,7 @@ class Fetcher:
         )
 
     def _fetch_youtube(self, hit: SearchHit, *, source_id: str, iteration: int) -> SourceRecord:
-        watch_url = _canonical_youtube_url(hit.url) or hit.url
+        watch_url = canonical_youtube_url(hit.url) or hit.url
         title = hit.title
         description = ""
         extra_note = ""
@@ -455,20 +457,6 @@ def _meta_content(html: str, name: str) -> str:
         if match:
             return re.sub(r"\s+", " ", match.group(1)).strip()
     return ""
-
-
-def _canonical_youtube_url(url: str) -> str:
-    parsed = urlparse(url)
-    host = parsed.netloc.lower()
-    if "youtu.be" in host:
-        video_id = parsed.path.strip("/")
-        if video_id:
-            return f"https://www.youtube.com/watch?v={video_id.split('/')[0]}"
-    query = parse_qs(parsed.query)
-    video_id = (query.get("v") or [None])[0]
-    if video_id:
-        return f"https://www.youtube.com/watch?v={video_id}"
-    return url
 
 
 def _reddit_html_urls(url: str) -> list[str]:

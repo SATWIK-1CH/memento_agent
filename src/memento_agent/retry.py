@@ -1,4 +1,4 @@
-"""Retry helpers that distinguish daily quota exhaustion from burst 429s."""
+"""Retry helpers that distinguish billing/quota failures from burst 429s."""
 
 from __future__ import annotations
 
@@ -8,7 +8,13 @@ import time
 from collections.abc import Callable
 from typing import TypeVar
 
-from memento_agent.errors import LLMError, QuotaExhaustedError, RateLimitError
+from memento_agent.errors import (
+    GroundingUnavailableError,
+    LLMError,
+    ModelUnavailableError,
+    QuotaExhaustedError,
+    RateLimitError,
+)
 
 T = TypeVar("T")
 
@@ -23,6 +29,13 @@ _DAILY_MARKERS = (
     "generate_content_free_tier_requests_per_day",
 )
 
+_BILLING_MARKERS = (
+    "plan and billing",
+    "check your plan and billing",
+    "billing details",
+    "enable billing",
+)
+
 _GROUNDING_UNAVAILABLE = (
     "google search grounding is not supported",
     "google_search is not supported",
@@ -30,6 +43,14 @@ _GROUNDING_UNAVAILABLE = (
     "search grounding",
     "grounding is not available",
 )
+
+_MODEL_GONE = (
+    "no longer available to new users",
+    "is not found for api version",
+    "not found",
+)
+
+_FATAL = (QuotaExhaustedError, GroundingUnavailableError, ModelUnavailableError)
 
 
 def call_with_retry(
@@ -40,18 +61,18 @@ def call_with_retry(
     max_delay_s: float = 32.0,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> T:
-    """Call ``fn``, backing off on transient 429/5xx. Daily quota is not retried."""
+    """Call ``fn``, backing off on transient 429/5xx. Billing/quota is not retried."""
     delay = initial_delay_s
     last_exc: BaseException | None = None
     for attempt in range(1, max_attempts + 1):
         try:
             return fn()
-        except QuotaExhaustedError:
+        except _FATAL:
             raise
         except Exception as exc:
             last_exc = exc
             mapped = classify_llm_error(exc)
-            if isinstance(mapped, QuotaExhaustedError):
+            if isinstance(mapped, _FATAL):
                 raise mapped from exc
             if isinstance(mapped, RateLimitError) and attempt < max_attempts:
                 wait = _retry_delay_seconds(exc, fallback=delay)
@@ -71,32 +92,35 @@ def classify_llm_error(exc: BaseException) -> Exception:
     if isinstance(exc, MementoError):
         return exc
     code = getattr(exc, "code", None)
-    message = _error_blob(exc)
+    message = _error_text(exc)
     lower = message.lower()
+
+    if _looks_like_model_unavailable(code, lower):
+        return ModelUnavailableError(
+            "This Gemini model is not available on this API key. New free-tier keys cannot "
+            "call gemini-2.5-* (Google's list() still shows them). memento defaults to "
+            "gemini-3.5-flash-lite, with gemini-3.8-flash as a fallback. Set MEMENTO_MODEL "
+            "to a model that works for your key."
+        )
 
     if any(marker in lower for marker in _GROUNDING_UNAVAILABLE) or (
         "google_search" in lower and ("not available" in lower or "not supported" in lower)
     ):
-        return LLMError(
-            "Google Search grounding is not available for this model on the current Gemini "
-            "API tier. On the free tier, Grounding with Google Search works with "
-            "gemini-2.5-flash and gemini-2.5-flash-lite (about 500 grounded requests/day "
-            "shared). Gemini 3+ models require billing for search. Set --model "
-            "gemini-2.5-flash or MEMENTO_SEARCH_MODEL=gemini-2.5-flash."
-        )
+        return GroundingUnavailableError(_grounding_help())
 
     if code == 429 or "resource_exhausted" in lower or "resource exhausted" in lower:
+        if any(marker in lower for marker in _BILLING_MARKERS):
+            return GroundingUnavailableError(_grounding_help())
         if _looks_like_daily_quota(lower):
             return QuotaExhaustedError(
-                "Gemini free-tier quota is exhausted for today. Grounding with Google Search "
-                "is capped at about 500 requests/day on the free tier (shared across "
-                "gemini-2.5-flash and gemini-2.5-flash-lite) and resets at midnight Pacific "
-                "Time. Wait until reset, or enable billing in Google AI Studio."
+                "Gemini free-tier quota is exhausted for today. Limits reset at midnight "
+                "Pacific Time. Wait until reset, or try again later. "
+                "See https://ai.google.dev/gemini-api/docs/rate-limits"
             )
         return RateLimitError(
             "Gemini rate-limited this request (HTTP 429). The agent retried with backoff "
-            "and still got 429. Wait a minute and try again; free-tier RPM/TPM limits "
-            "are per project. See https://ai.google.dev/gemini-api/docs/rate-limits"
+            "and still got 429. Wait a minute and try again. "
+            "See https://ai.google.dev/gemini-api/docs/rate-limits"
         )
 
     if code in {401, 403} or "api key not valid" in lower or "permission denied" in lower:
@@ -107,10 +131,32 @@ def classify_llm_error(exc: BaseException) -> Exception:
 
     if code in {500, 502, 503, 504}:
         return RateLimitError(
-            f"Gemini returned a transient server error ({code}). Wait a moment and retry."
+            f"Gemini returned a transient server error ({code}). Wait a moment and retry, "
+            "or let memento fall back to another free-tier model."
         )
 
-    return LLMError(f"Gemini request failed: {message or type(exc).__name__}")
+    short = _first_line(message)
+    return LLMError(f"Gemini request failed: {short or type(exc).__name__}")
+
+
+def _grounding_help() -> str:
+    return (
+        "Gemini Google Search grounding is not available on the free tier for Gemini 3.x "
+        "(a 429 mentioning plan/billing is the usual symptom). Keep memento free: use "
+        "Tavily search (default) with TAVILY_API_KEY from https://app.tavily.com "
+        "(Researcher plan, 1,000 credits/month, no card). Gemini grounding remains an "
+        "optional provider if you enable billing: --search-provider gemini"
+    )
+
+
+def _looks_like_model_unavailable(code: object, lower: str) -> bool:
+    if code == 404:
+        return True
+    if "no longer available to new users" in lower:
+        return True
+    if "this model" in lower and "not available" in lower:
+        return True
+    return False
 
 
 def _looks_like_daily_quota(blob: str) -> bool:
@@ -122,17 +168,23 @@ def _looks_like_daily_quota(blob: str) -> bool:
     return False
 
 
-def _error_blob(exc: BaseException) -> str:
-    parts = [str(exc)]
-    for attr in ("message", "status", "details"):
-        value = getattr(exc, attr, None)
-        if value:
-            parts.append(str(value))
-    return " ".join(parts)
+def _error_text(exc: BaseException) -> str:
+    """Single copy of the error message — do not concatenate str(exc)+message+details."""
+    msg = getattr(exc, "message", None)
+    if isinstance(msg, str) and msg.strip():
+        return msg.strip()
+    return str(exc).strip()
+
+
+def _first_line(text: str, *, limit: int = 240) -> str:
+    line = text.split("\n", 1)[0].strip()
+    if len(line) > limit:
+        return line[: limit - 1] + "…"
+    return line
 
 
 def _retry_delay_seconds(exc: BaseException, *, fallback: float) -> float:
-    blob = _error_blob(exc)
+    blob = _error_text(exc)
     match = re.search(r"retry in ([\d.]+)\s*s", blob, re.I)
     if match:
         try:

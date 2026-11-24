@@ -12,8 +12,9 @@ from memento_agent.corroborate import merge_followups
 from memento_agent.events import Event, EventBus
 from memento_agent.fetch import Fetcher
 from memento_agent.llm import GeminiLLM
+from memento_agent.preflight import preflight
 from memento_agent.render import render_markdown
-from memento_agent.search.gemini import GeminiSearchProvider
+from memento_agent.search import build_search_provider
 from memento_agent.sources import detect_source_types
 from memento_agent.store import Store
 from memento_agent.types import (
@@ -24,6 +25,7 @@ from memento_agent.types import (
     SourceRecord,
     SourceType,
 )
+from memento_agent.youtube import YouTubeAnalyzer
 
 
 class ResearchAgent:
@@ -35,6 +37,7 @@ class ResearchAgent:
         search: Any,
         fetcher: Fetcher,
         store: Store,
+        youtube: Any | None = None,
         on_event: Callable[[Event], None] | None = None,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -42,6 +45,7 @@ class ResearchAgent:
         self.llm = llm
         self.search = search
         self.fetcher = fetcher
+        self.youtube = youtube
         self.store = store
         self.events = EventBus(on_event)
         self._sleeper = sleeper
@@ -56,8 +60,8 @@ class ResearchAgent:
             run_id,
             question,
             types,
-            model=self.settings.model,
-            search_model=self.settings.effective_search_model,
+            model=self.llm.model if hasattr(self.llm, "model") else self.settings.model,
+            search_model=self.settings.search_label,
         )
         self.events.emit("start", f"Run {run_id}", run_id=run_id, source_types=[t.value for t in types])
 
@@ -116,6 +120,11 @@ class ResearchAgent:
                             source_id=record.id,
                             status=record.fetch_status.value,
                         )
+
+                if self.youtube is not None:
+                    self.youtube.enrich(sources, question, events=self.events)
+                    for record in sources:
+                        self.store.add_source(run_id, record)
 
                 self.events.emit("judge", f"Judging evidence after iteration {iteration}…")
                 last_judgment = self.llm.judge(
@@ -183,7 +192,7 @@ class ResearchAgent:
             )
         except Exception as exc:
             self.store.fail_run(run_id, str(exc), iterations=iterations, searches_used=searches_used)
-            self.events.emit("error", str(exc))
+            # Do not emit "error" here: the CLI (and callers) print the raised exception once.
             raise
 
 
@@ -196,24 +205,35 @@ def research(
     llm: Any | None = None,
     search: Any | None = None,
     fetcher: Fetcher | None = None,
+    youtube: Any | None = None,
 ) -> ResearchResult:
     """Public entry point used by the CLI and (later) a Windows tray/voice front end."""
     settings = settings or Settings.from_env()
     store = store or Store(settings.db_path)
+    events = EventBus(on_event)
     llm = llm or GeminiLLM(settings)
-    search = search or GeminiSearchProvider(llm)
+    if search is None:
+        preflight(settings, llm, events=events)
+        search = build_search_provider(settings, llm)
     owns_fetcher = fetcher is None
     fetcher = fetcher or Fetcher(
         timeout_s=settings.request_timeout_s,
         delay_s=settings.fetch_delay_s,
         excerpt_chars=settings.excerpt_chars,
     )
+    if youtube is None and hasattr(llm, "watch_video"):
+        youtube = YouTubeAnalyzer(
+            llm,
+            max_videos=settings.max_videos,
+            excerpt_chars=settings.excerpt_chars,
+        )
     agent = ResearchAgent(
         settings,
         llm=llm,
         search=search,
         fetcher=fetcher,
         store=store,
+        youtube=youtube,
         on_event=on_event,
     )
     try:
