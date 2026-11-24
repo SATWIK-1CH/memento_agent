@@ -6,7 +6,7 @@ from typing import Any
 
 from memento_agent.errors import ConfigError, QuotaExhaustedError, RateLimitError
 from memento_agent.retry import call_with_retry
-from memento_agent.sources import classify_url
+from memento_agent.sources import classify_url, is_reddit_thread
 from memento_agent.types import SearchHit, SourceType
 
 # Researcher (free) plan: 1,000 credits/month; basic search = 1 credit; 100 RPM.
@@ -49,6 +49,10 @@ class TavilySearchProvider:
             kwargs["include_domains_mode"] = "restrict"
         if exclude:
             kwargs["exclude_domains"] = exclude
+        if source_type is SourceType.REDDIT:
+            # Same 1-credit basic search; raw_content survives Reddit HTTP 403s.
+            # https://docs.tavily.com/documentation/api-reference/endpoint/search
+            kwargs["include_raw_content"] = True
 
         payload = call_with_retry(lambda: self._call_search(kwargs))
         hits: list[SearchHit] = []
@@ -56,16 +60,67 @@ class TavilySearchProvider:
             url = str(item.get("url") or "")
             if not url.startswith("http"):
                 continue
+            if source_type is SourceType.REDDIT and not is_reddit_thread(url):
+                continue
+            raw = str(item.get("raw_content") or "").strip()
+            snippet = raw or str(item.get("content") or item.get("snippet") or "")
+            if len(snippet) > 12_000:
+                snippet = snippet[:12_000].rstrip() + "…"
             hits.append(
                 SearchHit(
                     url=url,
                     title=str(item.get("title") or ""),
-                    snippet=str(item.get("content") or item.get("snippet") or ""),
+                    snippet=snippet,
                     source_type=classify_url(url, hinted=source_type),
                     query=query,
                 )
             )
         return hits[:max_results]
+
+    def extract(self, urls: list[str], *, query: str = "") -> dict[str, str]:
+        """Tavily Extract (basic = 1 credit per 5 URLs) for pages the fetcher could not open."""
+        cleaned: list[str] = []
+        for url in urls:
+            if not url.startswith("http"):
+                continue
+            if "reddit.com" in url.lower() and not is_reddit_thread(url):
+                continue
+            cleaned.append(url)
+            if len(cleaned) >= 20:
+                break
+        urls = cleaned
+        if not urls:
+            return {}
+        if not self._api_key and self._client is None:
+            return {}
+
+        def _call() -> dict[str, Any]:
+            client = self._client_or_create()
+            kwargs: dict[str, Any] = {"urls": urls, "extract_depth": "basic"}
+            if query:
+                kwargs["query"] = query
+                kwargs["chunks_per_source"] = 3
+            try:
+                result = client.extract(**kwargs)
+            except TypeError:
+                kwargs.pop("chunks_per_source", None)
+                kwargs.pop("query", None)
+                result = client.extract(**kwargs)
+            except Exception as exc:
+                raise _map_tavily_error(exc) from exc
+            return result if isinstance(result, dict) else {"results": list(result or [])}
+
+        try:
+            payload = call_with_retry(_call)
+        except Exception:
+            return {}
+        out: dict[str, str] = {}
+        for item in payload.get("results") or []:
+            url = str(item.get("url") or "")
+            content = str(item.get("raw_content") or item.get("content") or "").strip()
+            if url and content:
+                out[url] = content
+        return out
 
     def _call_search(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         client = self._client_or_create()

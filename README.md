@@ -15,8 +15,9 @@ question
    → search (Tavily by default; optional Gemini grounding)
    → fetch pages (browser-like GET; honest fallbacks)
    → watch the most relevant YouTube hits (Gemini video, then captions)
-   → judge: enough corroborated evidence? gaps?
-   → search again (budget cap) or write a cited brief
+   → extract named stays/areas + prices from evidence
+   → judge: two source types per stay? missing types? (does not stop after one pass)
+   → search again (budget cap) or write a cited brief that keeps every named stay
 ```
 
 The loop is a small plain-Python module (`memento_agent.agent.research`), not a heavyweight agent framework. That keeps sub-queries, sources, and answers explicit in SQLite so stage 2 (standing searches) and stage 3 (memory) can query the same file, and a tray/voice UI can call `research()` without going through the CLI.
@@ -158,12 +159,12 @@ CLI (typer)  ──►  research()  ──►  SQLite ~/.memento/memento.db
 
 - **Search is an interface** (`memento_agent.search.SearchProvider`). Default is `TavilySearchProvider`. `GeminiSearchProvider` remains for billed Google Search grounding.
 - **Persistence** (`runs`, `sub_queries`, `sources`, `judgments`) is the hook for stage 2 (diff new hits) and stage 3 (preferences + already-seen URLs).
-- **Corroboration:** the critic must tick `entity_checks` for named hotels/places. A name that appears in only one listicle is treated as a gap; the next iteration searches for an official/current listing and Reddit mentions. Parked/dead domains are marked `dead` and are not cited.
+- **Corroboration:** stays named in fetched pages are extracted into an inventory (with prices). The judge cannot stop after one pass while a stay is still single-source-type. The writer is merged with that inventory so names are not dropped, then citations are scrubbed so a description is only attached to sources that actually name the stay. A 503 on judge falls back to a coverage heuristic instead of failing the run.
 - **Source types** in the question (`Search YouTube, travel blogs and Reddit`) steer both queries (`include_domains` / `exclude_domains` on Tavily, `site:` on Gemini grounding) and the Sources section of the answer.
 
 ## YouTube
 
-Gemini can take a **public** YouTube URL as video input ([video understanding](https://ai.google.dev/gemini-api/docs/video-understanding)): 8 hours/day on the free tier, up to 10 videos per request on 2.5+, public videos only. memento watches at most `MEMENTO_MAX_VIDEOS` (default 2) of the most relevant hits, extracts stays shown / prices stated / pros/cons / timestamps, then feeds that into corroboration.
+Gemini can take a **public** YouTube URL as video input ([video understanding](https://ai.google.dev/gemini-api/docs/video-understanding)): 8 hours/day on the free tier, up to 10 videos per request on 2.5+, public videos only. Watches use **STATIC** frame extraction, **streaming**, and a 600s HTTP timeout (`v1beta`). Ranking keeps short tokens such as `goa` and prefers entity-specific reviews over generic “top 10” listicles. memento watches at most `MEMENTO_MAX_VIDEOS` (default 2) hits, with spacing and 503/429 retries. Captions accept English and Indian languages (`hi`, `ta`, …).
 
 If the watch fails or is rate-limited, captions are fetched with `youtube-transcript-api` (no extra key). Each source is labelled:
 
@@ -175,7 +176,7 @@ If the watch fails or is rate-limited, captions are fetched with `youtube-transc
 
 ## Known limitations (from real Agonda-style fetches)
 
-- **Reddit** is the weakest full-page source. Search snippets (e.g. r/goatravel) are useful; thread HTML, `old.reddit.com`, and `.json` often time out or hit a login wall. HEAD requests 403; we only GET, with a browser User-Agent. Unopened threads are cited as **search snippet only**.
+- **Reddit** often 403s on direct fetch. Tavily Reddit searches set `include_raw_content`; blocked threads are retried with Tavily Extract (1 credit / 5 URLs). If every thread stays blocked, the judge notes it once and does not treat Reddit as missing forever. Limitations collapse to one line (`N Reddit threads blocked; used search snippets`).
 - **YouTube** watches are capped. Captions can be messy (especially auto-Hindi). Title-only hits stay “featured in video &lt;title&gt;”.
 - **Official hotel sites** sometimes 406 or time out unless the GET looks like a browser; we retry 406 with a broader `Accept`. Advertised domains can be **parked/dead** — those URLs are validated and dropped from live citations.
 - **Listicles lie.** Names get copied wrong (a restaurant listed as a hotel, a 2019 rename). The loop asks for **two source types** before treating a name as confirmed.

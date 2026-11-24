@@ -39,7 +39,8 @@ def test_reddit_uses_include_domains() -> None:
             {
                 "url": "https://www.reddit.com/r/goatravel/comments/x/agonda/",
                 "title": "Agonda?",
-                "content": "We stayed at Simrose",
+                "content": "short",
+                "raw_content": "We stayed at Simrose — mid-range, on the sand.",
             }
         ]
     }
@@ -47,6 +48,50 @@ def test_reddit_uses_include_domains() -> None:
     hits = provider.search("Agonda hotels", source_type=SourceType.REDDIT)
     assert hits[0].source_type is SourceType.REDDIT
     assert client.calls[0]["include_domains"] == ["reddit.com"]
+    assert client.calls[0].get("include_raw_content") is True
+    assert "mid-range" in hits[0].snippet or "Simrose" in hits[0].snippet
+
+
+def test_reddit_search_drops_listing_urls() -> None:
+    client = DummyClient()
+    client.payload = {
+        "results": [
+            {
+                "url": "https://www.reddit.com/r/goatravel/top?after=t3_abc",
+                "title": "Top",
+                "content": "listing",
+            },
+            {
+                "url": "https://www.reddit.com/r/goatravel/comments/xyz/agonda/",
+                "title": "Agonda?",
+                "content": "We stayed at Simrose",
+            },
+        ]
+    }
+    provider = TavilySearchProvider("tvly-test", client=client)
+    hits = provider.search("Agonda hotels", source_type=SourceType.REDDIT)
+    assert len(hits) == 1
+    assert "/comments/" in hits[0].url
+
+
+def test_extract_returns_raw_content() -> None:
+    class ExtractClient(DummyClient):
+        def extract(self, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "results": [
+                    {
+                        "url": "https://www.reddit.com/r/goatravel/comments/x/agonda/",
+                        "raw_content": "Longer extracted thread about Simrose.",
+                    }
+                ]
+            }
+
+    client = ExtractClient()
+    provider = TavilySearchProvider("tvly-test", client=client)
+    out = provider.extract(["https://www.reddit.com/r/goatravel/comments/x/agonda/"], query="Agonda")
+    assert "Simrose" in out["https://www.reddit.com/r/goatravel/comments/x/agonda/"]
+    assert client.calls[0]["extract_depth"] == "basic"
 
 
 def test_blogs_exclude_social_hosts() -> None:

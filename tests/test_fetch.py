@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import httpx
 
-from memento_agent.fetch import Fetcher, _reddit_html_urls, _reddit_json_url, looks_parked
+from memento_agent.fetch import Fetcher, _reddit_html_urls, _reddit_json_url, looks_bot_wall, looks_parked
 from memento_agent.sources import is_grounding_redirect
 from memento_agent.types import FetchStatus, SearchHit, SourceType
 
@@ -10,6 +10,53 @@ from memento_agent.types import FetchStatus, SearchHit, SourceType
 def _client(handler) -> httpx.Client:
     transport = httpx.MockTransport(handler)
     return httpx.Client(transport=transport, follow_redirects=True)
+
+
+def test_bot_wall_verification_page_is_blocked() -> None:
+    html = (
+        "<html><head><title>Verifying Device</title></head>"
+        "<body><p>Verification failed.</p></body></html>"
+    )
+    assert looks_bot_wall(html, title="Verifying Device", excerpt="Verification failed.") is True
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text=html,
+        )
+
+    fetcher = Fetcher(client=_client(handler), delay_s=0)
+    rec = fetcher.fetch(
+        SearchHit(url="https://www.thetimes.com/agonda", title="Agonda", source_type=SourceType.WEB),
+        source_id="S1",
+        iteration=1,
+    )
+    assert rec.fetch_status is FetchStatus.BLOCKED
+    assert "verification" in rec.fetch_note.lower() or "bot" in rec.fetch_note.lower()
+
+
+def test_reddit_listing_url_skips_fetch() -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(403, text="blocked")
+
+    fetcher = Fetcher(client=_client(handler), delay_s=0)
+    rec = fetcher.fetch(
+        SearchHit(
+            url="https://www.reddit.com/r/goatravel/top?after=t3_abc",
+            title="Top posts",
+            snippet="listing",
+            source_type=SourceType.REDDIT,
+        ),
+        source_id="S8",
+        iteration=1,
+    )
+    assert rec.fetch_status is FetchStatus.SNIPPET_ONLY
+    assert "listing" in rec.fetch_note.lower() or "not a thread" in rec.fetch_note.lower()
+    assert requested == []
 
 
 def test_looks_parked_detects_for_sale_page() -> None:

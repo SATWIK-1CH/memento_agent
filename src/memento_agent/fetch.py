@@ -21,7 +21,12 @@ import memento_agent._warnings  # noqa: F401  — filter urllib3 SOCKS warning b
 import httpx
 import trafilatura
 
-from memento_agent.sources import canonical_youtube_url, classify_url, is_grounding_redirect
+from memento_agent.sources import (
+    canonical_youtube_url,
+    classify_url,
+    is_grounding_redirect,
+    is_reddit_thread,
+)
 from memento_agent.types import FetchStatus, SearchHit, SourceRecord, SourceType
 
 # Browser-like GET. A custom bot UA plus HEAD requests is what 403/406s many
@@ -52,6 +57,14 @@ _PARKED_BODY = re.compile(
     r"sedo domain parking|hugedomains|godaddy parking|"
     r"the domain is registered|this webpage is parked|"
     r"future home of|domain may be for sale",
+    re.I,
+)
+_BOT_WALL = re.compile(
+    r"verifying device|verification failed|are you a human|"
+    r"checking your browser|just a moment|enable javascript|"
+    r"attention required|cf-browser-verification|cf-challenge|"
+    r"please verify you are a human|access denied|"
+    r"subscribe to (?:continue|read)|create a free account to (?:read|continue)",
     re.I,
 )
 
@@ -230,6 +243,18 @@ class Fetcher:
             )
         html = response.text or ""
         title = _html_title(html) or hit.title
+        if looks_bot_wall(html, title=title):
+            return self._record(
+                hit,
+                source_id=source_id,
+                iteration=iteration,
+                source_type=classified,
+                status=FetchStatus.BLOCKED,
+                title=title,
+                excerpt=hit.snippet,
+                note="Page looks like a bot-wall, paywall, or device-verification interstitial; used the search snippet only.",
+                final_url=final_url,
+            )
         if looks_parked(html, title=title, final_url=final_url):
             return self._record(
                 hit,
@@ -252,6 +277,18 @@ class Fetcher:
             favor_recall=True,
             url=final_url,
         )
+        if looks_bot_wall(html, title=title, excerpt=extracted or ""):
+            return self._record(
+                hit,
+                source_id=source_id,
+                iteration=iteration,
+                source_type=classified,
+                status=FetchStatus.BLOCKED,
+                title=title,
+                excerpt=hit.snippet,
+                note="Page looks like a bot-wall, paywall, or device-verification interstitial; used the search snippet only.",
+                final_url=final_url,
+            )
         if extracted and extracted.strip():
             return self._record(
                 hit,
@@ -336,6 +373,16 @@ class Fetcher:
         old.reddit.com and .json often time out or hit a login wall. Snippets of
         comments (e.g. r/goatravel) are still useful and should not be discarded.
         """
+        if not is_reddit_thread(hit.url) and not is_grounding_redirect(hit.url):
+            return self._record(
+                hit,
+                source_id=source_id,
+                iteration=iteration,
+                source_type=SourceType.REDDIT,
+                status=FetchStatus.SNIPPET_ONLY,
+                excerpt=hit.snippet,
+                note="Reddit listing/search URL (not a thread); skipped fetch.",
+            )
         reddit_timeout = min(12.0, self._timeout_s)
         html_urls = _reddit_html_urls(hit.url)
         last_error = ""
@@ -378,15 +425,22 @@ class Fetcher:
                     final_url=str(response.url),
                 )
 
-        json_url = _reddit_json_url(hit.url)
-        try:
-            response = self._get(
-                json_url,
-                timeout=reddit_timeout,
-                headers={**DEFAULT_HEADERS, "Accept": "application/json,text/plain,*/*;q=0.8"},
-            )
+        for json_url in _reddit_json_urls(hit.url):
+            try:
+                response = self._get(
+                    json_url,
+                    timeout=reddit_timeout,
+                    headers={**DEFAULT_HEADERS, "Accept": "application/json,text/plain,*/*;q=0.8"},
+                )
+            except httpx.HTTPError as exc:
+                last_error = last_error or f"Reddit JSON failed: {exc}"
+                continue
             if response.status_code == 200:
-                payload = response.json()
+                try:
+                    payload = response.json()
+                except (json.JSONDecodeError, ValueError) as exc:
+                    last_error = last_error or f"Reddit JSON failed: {exc}"
+                    continue
                 title, excerpt = _reddit_excerpt(payload, fallback=hit.snippet)
                 if excerpt and excerpt != hit.snippet:
                     return self._record(
@@ -401,8 +455,18 @@ class Fetcher:
                     )
             else:
                 last_error = last_error or f"Reddit JSON HTTP {response.status_code}"
-        except (httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
-            last_error = last_error or f"Reddit JSON failed: {exc}"
+
+        if hit.snippet and len(hit.snippet) > 400:
+            # Tavily include_raw_content often has the thread when HTTP is 403.
+            return self._record(
+                hit,
+                source_id=source_id,
+                iteration=iteration,
+                source_type=SourceType.REDDIT,
+                status=FetchStatus.SNIPPET_ONLY,
+                excerpt=hit.snippet,
+                note="Reddit HTTP blocked; used Tavily raw content / search snippet.",
+            )
 
         note = (
             "Could not open the Reddit thread (timeout, login wall, or block). "
@@ -438,6 +502,22 @@ def looks_parked(html: str, *, title: str = "", final_url: str = "") -> bool:
         if any(p in host for p in ("hugedomains.com", "sedoparking.com", "parkingcrew.net")):
             return True
     return False
+
+
+def looks_bot_wall(html: str, *, title: str = "", excerpt: str = "") -> bool:
+    """True for bot-check, paywall, or 'Verifying Device' interstitials."""
+    hay = f"{title}\n{excerpt}\n{html[:3_000]}"
+    if not _BOT_WALL.search(hay):
+        return False
+    if title and _BOT_WALL.search(title):
+        return True
+    if excerpt and _BOT_WALL.search(excerpt) and len(excerpt) < 1_200:
+        return True
+    text = re.sub(r"<script[\s\S]*?</script>", " ", html, flags=re.I)
+    text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    compact = re.sub(r"\s+", " ", text).strip()
+    return len(compact) < 1_200
 
 
 def _html_title(html: str) -> str:
@@ -490,7 +570,18 @@ def _reddit_json_url(url: str) -> str:
         json_path = path
     else:
         json_path = f"{path}.json"
-    return f"https://old.reddit.com{json_path}?raw_json=1"
+    return f"https://www.reddit.com{json_path}?raw_json=1"
+
+
+def _reddit_json_urls(url: str) -> list[str]:
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    if not path.endswith(".json"):
+        path = f"{path}.json"
+    return [
+        f"https://www.reddit.com{path}?raw_json=1",
+        f"https://old.reddit.com{path}?raw_json=1",
+    ]
 
 
 def _looks_like_reddit_login(html: str) -> bool:

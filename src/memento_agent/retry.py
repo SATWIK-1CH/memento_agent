@@ -129,9 +129,16 @@ def classify_llm_error(exc: BaseException, *, grounded: bool = False) -> Excepti
             "https://aistudio.google.com/apikey"
         )
 
-    if code in {500, 502, 503, 504}:
+    status = str(getattr(exc, "status", "") or "").upper()
+    if (
+        code in {500, 502, 503, 504}
+        or status in {"UNAVAILABLE", "INTERNAL", "DEADLINE_EXCEEDED"}
+        or "high demand" in lower
+        or "overloaded" in lower
+    ):
+        label = code or status or "503"
         return RateLimitError(
-            f"Gemini returned a transient server error ({code}). Wait a moment and retry, "
+            f"Gemini returned a transient server error ({label}). Wait a moment and retry, "
             "or let memento fall back to another free-tier model."
         )
 

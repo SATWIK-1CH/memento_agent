@@ -82,6 +82,12 @@ def canonical_youtube_url(url: str) -> str:
     return url
 
 
+def is_reddit_thread(url: str) -> bool:
+    """True for /r/{sub}/comments/{id}/… threads, not listings like /r/foo/top."""
+    path = urlparse(url).path.lower()
+    return bool(re.search(r"/r/[^/]+/comments/[a-z0-9]+", path))
+
+
 def is_grounding_redirect(url: str) -> bool:
     host = urlparse(url).netloc.lower()
     if host.startswith("www."):

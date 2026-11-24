@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from memento_agent.types import Judgment, SourceRecord, SourceType
+from memento_agent.entities import inventory_block
+from memento_agent.types import ExtractedEntity, Judgment, SourceRecord, SourceType
 
 PLAN_SYSTEM = """You are the planner for a personal research agent.
 Break the user's question into a small set of web search sub-queries.
@@ -20,23 +21,18 @@ Rules:
 
 JUDGE_SYSTEM = """You are the critic for a personal research agent.
 Decide whether the collected sources are enough to write a cited answer.
-Enough means:
+Enough means ALL of:
 - The main parts of the question can be answered from readable evidence.
-- Named hotels/places are corroborated across at least TWO source types when possible
-  (e.g. a travel blog AND Reddit, or an official site AND a video title). Listicles
-  often mislabel restaurants as hotels or use old names — treat a name that appears
-  in only one listicle as uncorroborated.
+- Every stay in the entity inventory that looks like a hotel is corroborated across at
+  least TWO source types when two types were requested (blog+reddit, blog+youtube, etc.).
+  A name that appears in only one listicle or only YouTube is NOT enough.
+- Follow-up queries exist for those single-type names (per-hotel review, per-area query).
 - Dead, parked, or unfetched official URLs do not count as corroboration.
-- Reddit search snippets ARE usable evidence when the thread itself was blocked.
-- YouTube status youtube_watched: notes from Gemini watching the video (stays shown, prices
-  said on camera, pros/cons, timestamps). Treat as first-hand video evidence.
-- YouTube status youtube_transcript: captions only — useful but auto-captions can be messy;
-  do not treat a caption-only price as confirmed unless another source agrees.
-- YouTube status youtube_meta: title/description only; never invent room details from a title.
-- Requested source types were attempted; missing types are listed honestly.
-Fill entity_checks for every hotel/area you would mention. If a name is uncorroborated,
-add a follow-up query for its official/current name.
-If not enough, propose 1 to 3 follow-up searches that close the biggest gaps.
+- Reddit search snippets ARE usable evidence when the thread itself was blocked. If every
+  Reddit fetch was blocked, do not keep listing reddit as missing — note it once.
+- YouTube youtube_watched / youtube_transcript / youtube_meta as labelled.
+enough=false unless this is the last iteration or the search budget is gone.
+Fill entity_checks for EVERY name in the inventory. Propose 1 to 3 targeted follow-ups.
 Do not write the user-facing answer.
 """
 
@@ -69,8 +65,13 @@ Rules:
   thread could not be opened.
 - If the question is about hotels / places, group items into tiers (budget, mid-range,
   splurge) when sources support it, and explain why.
+- Include EVERY stay in the entity inventory. If evidence is thin, say so, but do not omit
+  the name. Include stated prices with the source id and a date caveat.
+- Cite a source for a claim only if that source's excerpt/title actually names the entity.
+  Do not attach another hotel's description to this one.
 - Be honest about unread pages, 406/timeouts, and name mismatches (renamed hotels).
-- Do not pad. Thin evidence belongs in limitations and open_questions.
+- Do not pad. Thin evidence belongs in limitations. Open questions should be specific
+  (a missing price, a rename) — not "needs more research".
 - Narrative fields may use [S1] inline citations.
 """
 
@@ -84,7 +85,7 @@ def plan_user_prompt(question: str, source_types: list[SourceType]) -> str:
     )
 
 
-def evidence_block(sources: list[SourceRecord], *, excerpt_limit: int = 4_000) -> str:
+def evidence_block(sources: list[SourceRecord], *, excerpt_limit: int = 1_200) -> str:
     chunks: list[str] = []
     for src in sources:
         excerpt = src.excerpt or src.snippet
@@ -112,16 +113,25 @@ def judge_user_prompt(
     sources: list[SourceRecord],
     iteration: int,
     max_iterations: int,
+    *,
+    entities: list[ExtractedEntity] | None = None,
+    excerpt_limit: int = 1_200,
 ) -> str:
     types = ", ".join(t.value for t in source_types)
     coverage = _coverage_summary(sources, source_types)
+    last = "LAST ITERATION — you may set enough=true with remaining gaps listed." if iteration >= max_iterations else (
+        "Not the last iteration: enough=false if any stay is still single-source-type "
+        "or a requested type (other than fully-blocked Reddit) is missing."
+    )
+    compact = _compact_sources(sources)
     return (
         f"User question:\n{question}\n\n"
         f"Requested source types: {types}\n"
-        f"Iteration {iteration} of {max_iterations}.\n"
+        f"Iteration {iteration} of {max_iterations}. {last}\n"
         f"Coverage:\n{coverage}\n\n"
-        f"Sources:\n{evidence_block(sources)}\n\n"
-        "Judge whether this is enough."
+        f"{inventory_block(entities or [])}\n\n"
+        f"Sources:\n{evidence_block(compact, excerpt_limit=excerpt_limit)}\n\n"
+        "Judge whether this is enough. Fill entity_checks from the inventory."
     )
 
 
@@ -130,6 +140,8 @@ def write_user_prompt(
     source_types: list[SourceType],
     sources: list[SourceRecord],
     judgment: Judgment,
+    *,
+    entities: list[ExtractedEntity] | None = None,
 ) -> str:
     types = ", ".join(t.value for t in source_types)
     return (
@@ -138,8 +150,10 @@ def write_user_prompt(
         f"Critic rationale: {judgment.rationale}\n"
         f"Gaps the critic still sees: {judgment.gaps or 'none listed'}\n"
         f"Corroborated points: {judgment.corroborated_points or 'none listed'}\n\n"
-        f"Sources you may cite:\n{evidence_block(sources)}\n\n"
-        "Write the structured answer. Cite source ids in every item and narrative. "
+        f"{inventory_block(entities or [])}\n\n"
+        f"Sources you may cite:\n{evidence_block(sources, excerpt_limit=2_400)}\n\n"
+        "Write the structured answer. Include every inventory stay. Cite source ids "
+        "only when that source names the entity. Include stated prices with a date caveat. "
         "For YouTube, say whether the video was watched, captions-only, or title-only."
     )
 
@@ -165,3 +179,28 @@ def _coverage_summary(sources: list[SourceRecord], requested: list[SourceType]) 
             f"- {source_type.value}: {len(matching)} hits, {len(readable)} readable"
         )
     return "\n".join(lines)
+
+
+def _compact_sources(sources: list[SourceRecord], *, limit: int = 12) -> list[SourceRecord]:
+    """Keep a type-diverse slice so flash-lite judge prompts stay small."""
+    if len(sources) <= limit:
+        return sources
+    picked: list[SourceRecord] = []
+    seen: set[str] = set()
+    for source_type in SourceType:
+        for src in sources:
+            if src.source_type is not source_type or src.id in seen:
+                continue
+            if not src.citable:
+                continue
+            picked.append(src)
+            seen.add(src.id)
+            if len(picked) >= limit:
+                return picked
+    for src in sources:
+        if src.id in seen:
+            continue
+        picked.append(src)
+        if len(picked) >= limit:
+            break
+    return picked

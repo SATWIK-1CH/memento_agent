@@ -36,7 +36,7 @@ class FakeLLM:
             ],
         )
 
-    def judge(self, question, sources, source_types, *, iteration, max_iterations) -> Judgment:
+    def judge(self, question, sources, source_types, *, iteration, max_iterations, **kwargs) -> Judgment:
         self.judge_calls += 1
         if self.judge_calls == 1:
             return Judgment(
@@ -78,7 +78,7 @@ class FakeLLM:
             ],
         )
 
-    def write(self, question, sources, source_types, judgment) -> ResearchAnswer:
+    def write(self, question, sources, source_types, judgment, **kwargs) -> ResearchAnswer:
         self.write_calls += 1
         ids = [s.id for s in sources if s.citable]
         return ResearchAnswer(

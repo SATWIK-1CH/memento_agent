@@ -105,6 +105,12 @@ def test_transient_429_retries_then_rate_limit() -> None:
     assert calls["n"] == 3
 
 
+def test_503_unavailable_is_rate_limit() -> None:
+    mapped = classify_llm_error(FakeAPIError(503, "The model is overloaded. Please try again later."))
+    assert isinstance(mapped, RateLimitError)
+    assert "503" in str(mapped) or "overloaded" in str(mapped).lower() or "transient" in str(mapped).lower()
+
+
 def test_grounding_unavailable_message_points_at_tavily() -> None:
     err = classify_llm_error(FakeAPIError(400, "google_search is not supported on this model for free tier"))
     assert isinstance(err, GroundingUnavailableError)
