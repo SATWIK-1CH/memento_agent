@@ -58,6 +58,13 @@ def detect_source_types(question: str) -> list[SourceType]:
     return found or list(_ALL_TYPES)
 
 
+def is_grounding_redirect(url: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host == "vertexaisearch.cloud.google.com" or host.endswith(".vertexaisearch.cloud.google.com")
+
+
 def classify_url(url: str, *, hinted: SourceType | None = None) -> SourceType:
     """Classify a result URL. A search hint wins only when the host is ambiguous."""
     host = urlparse(url).netloc.lower()

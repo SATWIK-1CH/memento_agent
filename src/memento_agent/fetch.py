@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import trafilatura
 
-from memento_agent.sources import classify_url
+from memento_agent.sources import classify_url, is_grounding_redirect
 from memento_agent.types import FetchStatus, SearchHit, SourceRecord, SourceType
 
 # Browser-like GET. A custom bot UA plus HEAD requests is what 403/406s many
@@ -82,12 +82,31 @@ class Fetcher:
 
     def fetch(self, hit: SearchHit, *, source_id: str, iteration: int) -> SourceRecord:
         self._throttle()
+        hit = self._unwrap_grounding_hit(hit)
         source_type = hit.source_type or classify_url(hit.url)
         if source_type is SourceType.YOUTUBE:
             return self._fetch_youtube(hit, source_id=source_id, iteration=iteration)
         if source_type is SourceType.REDDIT:
             return self._fetch_reddit(hit, source_id=source_id, iteration=iteration)
         return self._fetch_html(hit, source_id=source_id, iteration=iteration, source_type=source_type)
+
+    def _unwrap_grounding_hit(self, hit: SearchHit) -> SearchHit:
+        """Follow Gemini grounding redirects so host-based fetchers see the real URL."""
+        if not is_grounding_redirect(hit.url):
+            return hit
+        try:
+            response = self._get(hit.url, timeout=min(12.0, self._timeout_s))
+        except httpx.HTTPError:
+            return hit
+        final_url = str(response.url)
+        if not final_url.startswith("http") or is_grounding_redirect(final_url):
+            return hit
+        return hit.model_copy(
+            update={
+                "url": final_url,
+                "source_type": classify_url(final_url, hinted=hit.source_type),
+            }
+        )
 
     def _throttle(self) -> None:
         if self._delay_s <= 0:
@@ -454,6 +473,12 @@ def _canonical_youtube_url(url: str) -> str:
 
 def _reddit_html_urls(url: str) -> list[str]:
     parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    # Never graft an opaque grounding-redirect path onto reddit.com.
+    if "reddit.com" not in host and not host.endswith("redd.it") and host != "redd.it":
+        return [url]
     path = parsed.path or "/"
     if path.endswith(".json"):
         path = path[: -len(".json")]
@@ -467,6 +492,11 @@ def _reddit_html_urls(url: str) -> list[str]:
 
 def _reddit_json_url(url: str) -> str:
     parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if "reddit.com" not in host and not host.endswith("redd.it") and host != "redd.it":
+        return url
     path = parsed.path.rstrip("/")
     if path.endswith(".json"):
         json_path = path

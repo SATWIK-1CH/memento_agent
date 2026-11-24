@@ -120,9 +120,22 @@ class SourceRecord(BaseModel):
         return self.final_url or self.url
 
     @property
+    def evidence_text(self) -> str:
+        return (self.excerpt or self.snippet or "").strip()
+
+    @property
     def citable(self) -> bool:
-        """Dead/parked URLs must not be cited as live sources."""
-        return self.fetch_status is not FetchStatus.DEAD
+        """True only when there is something a writer may actually quote.
+
+        Dead/parked URLs are never cited. Failed or blocked fetches are cited
+        only if the search snippet (or extracted excerpt) is non-empty.
+        YouTube title/description counts as evidence even without a page body.
+        """
+        if self.fetch_status is FetchStatus.DEAD:
+            return False
+        if self.fetch_status is FetchStatus.YOUTUBE_META:
+            return bool((self.title or self.evidence_text).strip())
+        return bool(self.evidence_text)
 
 
 class ResearchResult(BaseModel):

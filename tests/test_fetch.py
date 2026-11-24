@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import httpx
 
-from memento_agent.fetch import Fetcher, looks_parked
+from memento_agent.fetch import Fetcher, _reddit_html_urls, _reddit_json_url, looks_parked
+from memento_agent.sources import is_grounding_redirect
 from memento_agent.types import FetchStatus, SearchHit, SourceType
 
 
@@ -88,6 +89,50 @@ def test_reddit_falls_back_to_snippet_on_403() -> None:
     assert rec.fetch_status in {FetchStatus.BLOCKED, FetchStatus.SNIPPET_ONLY}
     assert "Simrose" in rec.excerpt
     assert "snippet" in rec.fetch_note.lower() or "blocked" in rec.fetch_note.lower() or "could not open" in rec.fetch_note.lower()
+
+
+def test_reddit_url_helpers_do_not_rewrite_grounding_redirects() -> None:
+    redirect = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc123"
+    assert is_grounding_redirect(redirect)
+    assert _reddit_html_urls(redirect) == [redirect]
+    assert _reddit_json_url(redirect) == redirect
+
+
+def test_reddit_resolves_grounding_redirect_before_fetch() -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if "vertexaisearch.cloud.google.com" in str(request.url):
+            return httpx.Response(
+                302,
+                headers={"location": "https://www.reddit.com/r/goatravel/comments/abc/agonda/"},
+            )
+        if "raw_json" in str(request.url) or str(request.url).endswith(".json"):
+            return httpx.Response(403, text="blocked")
+        if "reddit.com" in str(request.url):
+            body = (
+                "<html><head><title>Agonda in December?</title></head>"
+                "<body><p>" + ("Simrose on the sand. " * 40) + "</p></body></html>"
+            )
+            return httpx.Response(200, text=body)
+        return httpx.Response(404, text="missing")
+
+    fetcher = Fetcher(client=_client(handler), delay_s=0)
+    rec = fetcher.fetch(
+        SearchHit(
+            url="https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc123",
+            title="r/goatravel",
+            snippet="Simrose mention",
+            source_type=SourceType.REDDIT,
+        ),
+        source_id="S1",
+        iteration=1,
+    )
+    assert rec.source_type is SourceType.REDDIT
+    assert "reddit.com/r/goatravel/comments/abc/agonda" in rec.display_url
+    assert rec.fetch_status is FetchStatus.OK
+    assert not any("reddit.com/grounding-api-redirect" in u for u in requested)
 
 
 def test_youtube_uses_oembed_title_only() -> None:

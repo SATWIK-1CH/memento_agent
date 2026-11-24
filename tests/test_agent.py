@@ -4,7 +4,13 @@ from tests.fakes import FakeFetcher, FakeLLM, FakeSearch
 
 from memento_agent.agent import ResearchAgent, research
 from memento_agent.errors import QuotaExhaustedError
-from memento_agent.types import FetchStatus, SourceType
+from memento_agent.types import (
+    FetchStatus,
+    Judgment,
+    SearchHit,
+    SourceRecord,
+    SourceType,
+)
 
 
 def test_loop_searches_again_when_judge_finds_gaps(settings, store) -> None:
@@ -63,6 +69,52 @@ def test_failed_run_is_persisted(settings, store) -> None:
         pass
     rows = store.list_runs()
     assert rows[0]["status"] == "failed"
+
+
+def test_failed_empty_hits_skip_the_writer(settings, store) -> None:
+    class EmptySearch:
+        def search(self, *args, **kwargs):
+            return [
+                SearchHit(
+                    url="https://example.com/blocked",
+                    title="",
+                    snippet="",
+                    source_type=SourceType.WEB,
+                )
+            ]
+
+    class EmptyFetcher:
+        def fetch(self, hit, *, source_id, iteration):
+            return SourceRecord(
+                id=source_id,
+                url=hit.url,
+                source_type=SourceType.WEB,
+                fetch_status=FetchStatus.FAILED,
+                fetch_note="timeout",
+                excerpt="",
+                snippet="",
+            )
+
+        def close(self) -> None:
+            return None
+
+    class StopLLM(FakeLLM):
+        def judge(self, *args, **kwargs):
+            self.judge_calls += 1
+            return Judgment(enough=True, rationale="nothing usable")
+
+    llm = StopLLM()
+    agent = ResearchAgent(
+        settings,
+        llm=llm,
+        search=EmptySearch(),
+        fetcher=EmptyFetcher(),
+        store=store,
+        sleeper=lambda _d: None,
+    )
+    result = agent.run("Agonda hotels?", source_types=[SourceType.WEB])
+    assert llm.write_calls == 0
+    assert "No citable sources" in result.markdown
 
 
 def test_empty_question_rejected(settings, store) -> None:
