@@ -75,6 +75,31 @@ def test_enforce_coverage_blocks_early_enough() -> None:
     assert any("cuba" in g.lower() for g in out.gaps)
 
 
+def test_missing_source_followup_uses_question_topic() -> None:
+    judgment = Judgment(enough=True, gaps=[], missing_source_types=[SourceType.YOUTUBE], entity_checks=[])
+    out = enforce_coverage(
+        judgment,
+        [],
+        [
+            SourceRecord(
+                id="S1",
+                url="https://docs.python.org/3/whatsnew/3.13.html",
+                source_type=SourceType.WEB,
+                fetch_status=FetchStatus.OK,
+                excerpt="Python 3.13 release notes.",
+            )
+        ],
+        [SourceType.WEB, SourceType.YOUTUBE],
+        iteration=1,
+        max_iterations=3,
+        question="Python 3.13 release notes. Search YouTube and the web.",
+    )
+    queries = [f.query.lower() for f in out.followup_queries]
+    assert queries
+    assert not any("agonda" in q for q in queries)
+    assert any("python 3.13" in f.query.lower() and f.source_type is SourceType.YOUTUBE for f in out.followup_queries)
+
+
 def test_limitations_collapse_reddit_403s() -> None:
     sources = [
         SourceRecord(

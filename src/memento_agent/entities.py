@@ -63,6 +63,77 @@ _STOP_NAMES = {
     "search snippet",
 }
 _HOTEL_SUFFIX_HINT = re.compile(_HOTEL_SUFFIX, re.I)
+_STOP_LAST = {
+    "france",
+    "tower",
+    "express",
+    "museum",
+    "airport",
+    "station",
+    "cathedral",
+    "monument",
+    "bridge",
+    "kingdom",
+    "republic",
+    "states",
+    "india",
+    "europe",
+}
+_STAY_NOUNS = {
+    "hotel",
+    "hotels",
+    "resort",
+    "resorts",
+    "villa",
+    "villas",
+    "cottage",
+    "cottages",
+    "stay",
+    "stays",
+    "hut",
+    "huts",
+    "homestay",
+    "inn",
+    "lodge",
+    "retreat",
+    "rooms",
+}
+_STAY_VERBS = {
+    "liked",
+    "love",
+    "loved",
+    "recommend",
+    "recommended",
+    "booked",
+    "stayed",
+    "staying",
+    "picked",
+    "chose",
+    "choose",
+}
+_STAY_VERB_RE = re.compile(
+    r"\b(?:liked|love[d]?|recommend(?:ed)?|booked|stayed|staying|picked|chose|choose)\b",
+    re.I,
+)
+_PRICE_LEAD = {
+    "rooms",
+    "room",
+    "prices",
+    "price",
+    "rates",
+    "rate",
+    "rating",
+    "ratings",
+    "it",
+    "this",
+    "there",
+    "they",
+    "we",
+    "nights",
+    "night",
+    "cost",
+    "costs",
+}
 _STOP_FIRST = {
     "best",
     "top",
@@ -133,11 +204,13 @@ def extract_entities(sources: list[SourceRecord], question: str = "") -> list[Ex
             left, right = match.group(1), match.group(2)
             if left.lower() in _AREA_WORDS or right.lower() in _AREA_WORDS:
                 continue
+            sentence = _sentences_about(blob, left) or match.group(0)
             if (
-                question_is_stays
-                or _looks_like_stay(left, blob)
-                or _HOTEL_SUFFIX_HINT.search(left)
+                _HOTEL_SUFFIX_HINT.search(left)
                 or _HOTEL_SUFFIX_HINT.search(right)
+                or _looks_like_stay(left, blob, question_is_stays=question_is_stays)
+                or _looks_like_stay(right, blob, question_is_stays=question_is_stays)
+                or (question_is_stays and _STAY_VERB_RE.search(sentence))
             ):
                 add(left, "hotel", source, match.group(0))
                 add(right, "hotel", source, match.group(0))
@@ -145,13 +218,13 @@ def extract_entities(sources: list[SourceRecord], question: str = "") -> list[Ex
             add(f"{match.group(1)} {match.group(2)}", "hotel", source, match.group(0))
         for match in _SPAN_RE.finditer(blob):
             name = match.group(1)
-            if _HOTEL_SUFFIX_HINT.search(name) or _looks_like_stay(name, blob) or (
-                question_is_stays and len(name.split()) >= 2
+            if _HOTEL_SUFFIX_HINT.search(name) or _looks_like_stay(
+                name, blob, question_is_stays=question_is_stays
             ):
                 add(name, "hotel", source, name)
         for match in _THE_NAME_RE.finditer(blob):
             name = match.group(1)
-            if _looks_like_stay(name, blob) or question_is_stays:
+            if _looks_like_stay(name, blob, question_is_stays=question_is_stays):
                 add(name, "hotel", source, name)
         for match in _STAYED_RE.finditer(blob):
             add(match.group(1), "hotel", source, match.group(0))
@@ -159,8 +232,7 @@ def extract_entities(sources: list[SourceRecord], question: str = "") -> list[Ex
             token = match.group(1)
             if token in {"HTTP", "HTML", "JSON", "GOA", "INR", "USD", "OK"}:
                 continue
-            coded = any(ch.isdigit() for ch in token)
-            if _looks_like_stay(token, blob) or (question_is_stays and coded):
+            if _looks_like_stay(token, blob, question_is_stays=question_is_stays):
                 add(token, "hotel", source, token)
         lower = blob.lower()
         for area in _AREA_WORDS:
@@ -422,20 +494,36 @@ def _clean_name(name: str) -> str:
 
 
 def _is_stop(name: str) -> bool:
-    return name.lower() in _STOP_NAMES or len(name) < 3
+    if name.lower() in _STOP_NAMES or len(name) < 3:
+        return True
+    last = name.split()[-1].lower()
+    return last in _STOP_LAST
 
 
 def _key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
 
 
-def _looks_like_stay(name: str, blob: str) -> bool:
-    lower = blob.lower()
-    window = _quote_around(lower, name.lower(), radius=80).lower()
-    return any(
-        word in window
-        for word in ("hotel", "resort", "villa", "cottage", "stay", "huts", "homestay", "inn", "lodge")
-    )
+def _looks_like_stay(name: str, blob: str, *, question_is_stays: bool = False) -> bool:
+    if _HOTEL_SUFFIX_HINT.search(name):
+        return True
+    sentence = _sentences_about(blob, name) or _quote_around(blob, name, radius=50)
+    if not sentence:
+        return False
+    tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9']+", sentence)]
+    needle = [t.lower() for t in re.findall(r"[A-Za-z0-9']+", name)]
+    if not needle:
+        return False
+    width = len(needle)
+    for index in range(len(tokens) - width + 1):
+        if tokens[index : index + width] != needle:
+            continue
+        window = tokens[max(0, index - 4) : index + width + 4]
+        if any(word in _STAY_NOUNS for word in window):
+            return True
+        if question_is_stays and any(word in _STAY_VERBS for word in window):
+            return True
+    return False
 
 
 def _quote_around(blob: str, name: str, *, radius: int = 90) -> str:
@@ -448,21 +536,29 @@ def _quote_around(blob: str, name: str, *, radius: int = 90) -> str:
 
 
 def _prices_near(blob: str, name: str) -> list[str]:
-    needle = name.lower()
-    sentences = re.split(r"(?<=[.!?])\s+", blob)
     found: list[str] = []
-    for index, sentence in enumerate(sentences):
-        if needle not in sentence.lower():
-            continue
-        if sentence.count(",") >= 2 and not _PRICE_RE.search(sentence):
-            continue
-        found.extend(m.group(0).strip() for m in _PRICE_RE.finditer(sentence))
-        for nxt in sentences[index + 1 : index + 3]:
-            if needle in nxt.lower() or not _SPAN_RE.search(nxt):
-                found.extend(m.group(0).strip() for m in _PRICE_RE.finditer(nxt))
-            elif _PRICE_RE.search(nxt) and needle in nxt.lower():
-                found.extend(m.group(0).strip() for m in _PRICE_RE.finditer(nxt))
+    for match in re.finditer(re.escape(name), blob, flags=re.I):
+        prefix = blob[max(0, match.start() - 40) : match.start()]
+        if "." in prefix:
+            prefix = prefix.rsplit(".", 1)[-1]
+        after = blob[match.end() :]
+        window = prefix + blob[match.start() : match.end() + _price_window_end(after)]
+        found.extend(m.group(0).strip() for m in _PRICE_RE.finditer(window))
     return list(dict.fromkeys(found))[:4]
+
+
+def _price_window_end(after: str) -> int:
+    """Stop at the next sentence that introduces a different named stay."""
+    end = len(after)
+    for match in re.finditer(r"\.\s+([A-Z0-9])", after):
+        rest = after[match.end() - 1 :]
+        first = re.match(r"[A-Za-z0-9']+", rest)
+        word = first.group(0).lower() if first else ""
+        if not word or word.isdigit() or word in _PRICE_LEAD:
+            continue
+        end = min(end, match.start() + 1)
+        break
+    return end
 
 
 def _ratings_near(blob: str, name: str) -> list[str]:

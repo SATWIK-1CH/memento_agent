@@ -159,6 +159,7 @@ class ResearchAgent:
                     types,
                     iteration=iteration,
                     max_iterations=self.settings.max_iterations,
+                    question=question,
                 )
                 if searches_used >= self.settings.max_searches:
                     last_judgment.enough = True
@@ -208,6 +209,7 @@ class ResearchAgent:
                         types,
                         iteration=max(iterations, 1),
                         max_iterations=self.settings.max_iterations,
+                        question=question,
                     )
                     self.store.add_judgment(run_id, max(iterations, 1), last_judgment)
                 answer = self._write(question, sources, types, last_judgment, inventory)
@@ -265,6 +267,7 @@ class ResearchAgent:
                 types,
                 iteration=iteration,
                 max_iterations=self.settings.max_iterations,
+                question=question,
             )
 
     def _write(self, question, sources, types, judgment, inventory):

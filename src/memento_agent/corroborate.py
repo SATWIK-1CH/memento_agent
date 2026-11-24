@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from memento_agent.types import (
     EntityCheck,
     ExtractedEntity,
@@ -32,6 +34,7 @@ def enforce_coverage(
     *,
     iteration: int,
     max_iterations: int,
+    question: str = "",
 ) -> Judgment:
     """Do not stop while important stays lack two source types or a requested type is missing."""
     blocked_reddit = reddit_unreachable(sources)
@@ -74,7 +77,7 @@ def enforce_coverage(
     judgment.missing_source_types = missing
     judgment.entity_checks = checks
     if not last_round:
-        extra = _followups_for(uncorroborated, missing, blocked_reddit)
+        extra = _followups_for(uncorroborated, missing, blocked_reddit, question=question)
         have = {(f.query.lower(), f.source_type) for f in judgment.followup_queries}
         for follow in extra:
             key = (follow.query.lower(), follow.source_type)
@@ -200,6 +203,7 @@ def heuristic_judgment(
     *,
     iteration: int,
     max_iterations: int,
+    question: str = "",
 ) -> Judgment:
     """Used when Gemini judge calls fail (503) so the run can still continue."""
     judgment = Judgment(
@@ -214,6 +218,7 @@ def heuristic_judgment(
         requested,
         iteration=iteration,
         max_iterations=max_iterations,
+        question=question,
     )
 
 
@@ -258,8 +263,11 @@ def _followups_for(
     uncorroborated: list[ExtractedEntity],
     missing: list[SourceType],
     blocked_reddit: bool,
+    *,
+    question: str = "",
 ) -> list[FollowupQuery]:
     out: list[FollowupQuery] = []
+    topic = _topic_from_question(question)
     for entity in uncorroborated[:4]:
         out.append(
             FollowupQuery(
@@ -281,12 +289,22 @@ def _followups_for(
             continue
         out.append(
             FollowupQuery(
-                query="Agonda hotels",
+                query=topic,
                 source_type=source_type,
                 gap=f"Missing {source_type.value} coverage",
             )
         )
     return out[:4]
+
+
+def _topic_from_question(question: str) -> str:
+    text = re.sub(r"\s+", " ", (question or "").strip())
+    if not text:
+        return "the topic"
+    text = re.split(r"\bsearch\b", text, maxsplit=1, flags=re.I)[0]
+    text = re.split(r"(?<!\d)[.?!](?!\d)", text, maxsplit=1)[0]
+    text = text.strip(" ,;:-")
+    return text[:90] or "the topic"
 
 
 def _sources_for(check: EntityCheck, sources: list[SourceRecord]) -> list[SourceRecord]:

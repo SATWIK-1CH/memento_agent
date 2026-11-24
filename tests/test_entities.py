@@ -141,6 +141,39 @@ def test_merge_adds_dropped_hotels() -> None:
     assert any("villas" in n for n in names)
 
 
+def test_prices_do_not_leak_across_named_stays() -> None:
+    from memento_agent.entities import _prices_near
+
+    blob = "Agonda Villas costs ₹9000 per night. Simrose costs ₹4500 per night."
+    villas = _prices_near(blob, "Agonda Villas")
+    simrose = _prices_near(blob, "Simrose")
+    assert any("9000" in p for p in villas)
+    assert not any("4500" in p for p in villas)
+    assert any("4500" in p for p in simrose)
+    assert not any("9000" in p for p in simrose)
+
+
+def test_does_not_treat_landmarks_as_hotels() -> None:
+    sources = [
+        SourceRecord(
+            id="S1",
+            url="https://blog.example/paris",
+            title="Paris first-timers",
+            source_type=SourceType.BLOG,
+            fetch_status=FetchStatus.OK,
+            excerpt=(
+                "Hotel Ritz is near the Eiffel Tower. Paris France offers great stays. "
+                "Book via American Express."
+            ),
+        )
+    ]
+    names = {e.name.lower() for e in extract_entities(sources, "Best hotels in Paris")}
+    assert not any("eiffel" in n for n in names), names
+    assert not any("american express" in n for n in names), names
+    assert not any(n == "paris france" for n in names), names
+    assert any("ritz" in n for n in names), names
+
+
 def test_tidy_open_questions_drops_generic() -> None:
     cleaned = tidy_open_questions(
         ["Needs more research", "What is Simrose charging this month?", "Always check latest prices online"]
